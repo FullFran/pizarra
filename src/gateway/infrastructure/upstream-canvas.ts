@@ -11,12 +11,14 @@ const require = createRequire(import.meta.url);
 export const UPSTREAM_SERVER_ENTRY = require.resolve('mcp-excalidraw-server/dist/server.js');
 const GUARDIAN = pathToFileURL(fileURLToPath(new URL('./canvas-guardian.js', import.meta.url))).href;
 /** The upstream identifies itself on /health with this service name. */
-const UPSTREAM_SERVICE = 'mcp-excalidraw-canvas';
+export const UPSTREAM_SERVICE = 'mcp-excalidraw-canvas';
 /** Environment the upstream may see: never the gateway's auth settings. */
 const PASSED_ENV = ['PATH', 'HOME', 'TMPDIR', 'TZ', 'LANG', 'NODE_ENV', 'LOG_LEVEL', 'XDG_STATE_HOME', 'ENABLE_CANVAS_SYNC'];
 
 export interface SupervisorOptions {
   port: number;
+  /** Where the upstream listens (default 127.0.0.1); health checks always use loopback. */
+  bindHost?: string;
   logger: Logger;
   env?: Record<string, string | undefined>;
   /** Durable canvas state directory (upstream's `EXCALIDRAW_DATA_DIR`); none keeps the canvas in memory. */
@@ -46,9 +48,11 @@ export class UpstreamCanvasSupervisor implements CanvasUpstream {
   private readonly startTimeoutMs: number;
   private readonly maxRestartDelayMs: number;
   private readonly dataDir: string | undefined;
+  private readonly bindHost: string;
 
   constructor(options: SupervisorOptions) {
     this.port = options.port;
+    this.bindHost = options.bindHost ?? '127.0.0.1';
     this.logger = options.logger;
     this.env = options.env ?? process.env;
     this.startTimeoutMs = options.startTimeoutMs ?? 15000;
@@ -83,7 +87,7 @@ export class UpstreamCanvasSupervisor implements CanvasUpstream {
       const value = this.env[name];
       if (value !== undefined) env[name] = value;
     }
-    Object.assign(env, { HOST: this.host, PORT: String(this.port), EXCALIDRAW_NO_AUTOSTART: '1' });
+    Object.assign(env, { HOST: this.bindHost, PORT: String(this.port), EXCALIDRAW_NO_AUTOSTART: '1' });
     if (this.dataDir) {
       env.EXCALIDRAW_DATA_DIR = this.dataDir;
       const lock = clearStaleCanvasLock(this.dataDir);

@@ -43,6 +43,9 @@ On a loopback bind, GitHub or auth variables without `AUTH_MODE=oauth` are ignor
 | `AUTH_REFRESH_TOKEN_TTL_SECONDS` | no | Refresh token lifetime. Default 30 days. |
 | `AUTH_SESSION_TTL_SECONDS` | no | Browser session lifetime. Default 7 days. |
 | `CANVAS_INTERNAL_PORT` | no | Loopback port of the upstream canvas inside the gateway's host or container. Default: a free port (`3100` in the image). |
+| `PIZARRA_ROLE` | no | `gateway` (default) or `canvas`. `canvas` runs only the upstream canvas (on `CANVAS_BIND_HOST:CANVAS_INTERNAL_PORT`, with `<data>/canvas`), for gateways in other containers; it has no auth of its own, so reach it only from a private network. |
+| `CANVAS_URL` | no | `http://host:port` of a canvas run with `PIZARRA_ROLE=canvas`. The gateway then spawns no canvas and its `/health` follows that canvas. Several gateways can share one canvas this way. |
+| `CANVAS_BIND_HOST` | no | Where the `canvas` role listens. Default `0.0.0.0`. |
 | `GITHUB_OAUTH_BASE_URL` / `GITHUB_API_BASE_URL` | no | Override `https://github.com` / `https://api.github.com` (GitHub Enterprise, or a fake GitHub in tests). |
 
 `GITHUB_CLIENT_SECRET` and `GITHUB_CLIENT_SECRET_FILE` are no longer used. If one is still set, the server starts and logs a warning; remove it.
@@ -73,6 +76,8 @@ node dist/main.js
 ```
 
 In a container, mount `EXCALIDRAW_DATA_DIR` on a persistent volume so the generated secret, tokens and canvas survive redeploys; there is no secret to put in the deployment's environment.
+
+**Zero-downtime deploys.** Run the canvas as its own container (`PIZARRA_ROLE=canvas`, one copy, replaced stop-then-start) and the gateway with `CANVAS_URL` pointing at it, both on the same data volume. Gateways then hold no state of their own: sessions are signed cookies, and everything else (clients, tokens, codes, consent tickets, device logins) is in `auth-store.json`, shared safely between copies. A new gateway can start next to the old one and take over once healthy. Never run two canvas copies on one data directory: each keeps the canvas in memory and the last to write would win.
 
 ## Signing in
 
