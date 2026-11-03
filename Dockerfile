@@ -1,7 +1,8 @@
 # pizarra: the authenticated gateway in front of the unmodified
-# mcp-excalidraw-server canvas. One container, two processes: the gateway
-# (the only listener on $PORT) and the upstream canvas it supervises on
-# 127.0.0.1:$CANVAS_INTERNAL_PORT.
+# mcp-excalidraw-server canvas. Default image (last stage): one container,
+# two processes, the gateway (the only listener on $PORT) and the upstream
+# canvas it supervises on 127.0.0.1:$CANVAS_INTERNAL_PORT. Target `canvas`:
+# the canvas alone, for gateways that set CANVAS_URL (zero-downtime deploys).
 #
 # Lessons kept from the fork's Dockerfile.canvas:
 #   - @modelcontextprotocol/* stays in node_modules (/mcp needs the SDK);
@@ -49,8 +50,9 @@ RUN VERS=$(node -p "require('./node_modules/@resvg/resvg-js/package.json').versi
     rm -f /tmp/resvg.tgz /tmp/resvgjs.linux-$ARCH-musl.node && \
     rm -rf vendor
 
-# ---- runtime: alpine + Node from the alpine repo (no npm at runtime) ----
-FROM alpine:3.23 AS runtime
+# ---- base: alpine + Node from the alpine repo (no npm at runtime) ----
+# Shared by both images below; everything here changes only with dependencies.
+FROM alpine:3.23 AS base
 RUN apk add --no-cache nodejs && \
     node -e "if (parseInt(process.versions.node, 10) < 20) { console.error('node ' + process.versions.node + ' < 20'); process.exit(1); }"
 RUN addgroup -S -g 1001 pizarra && \
@@ -65,11 +67,9 @@ VOLUME ["/data"]
 
 COPY --chown=pizarra:pizarra --from=build /app/package.json ./package.json
 COPY --chown=pizarra:pizarra --from=build /app/node_modules ./node_modules
-COPY --chown=pizarra:pizarra --from=build /app/dist ./dist
 
 # Build-time smoke tests: a broken assumption fails the build, not production.
-RUN node --check dist/main.js && \
-    node --input-type=module -e "await import('@modelcontextprotocol/server'); console.log('smoke: MCP SDK OK')" && \
+RUN node --input-type=module -e "await import('@modelcontextprotocol/server'); console.log('smoke: MCP SDK OK')" && \
     node -e "\
       const fs = require('fs');\
       const r = require('@resvg/resvg-js');\
@@ -77,17 +77,35 @@ RUN node --check dist/main.js && \
       if (png.length < 40) throw new Error('resvg PNG too small');\
       for (const f of ['node_modules/mcp-excalidraw-server/dist/server.js', 'node_modules/mcp-excalidraw-server/dist/core/canvas-persistence.js', 'node_modules/mcp-excalidraw-server/dist/frontend/index.html', 'node_modules/mcp-excalidraw-server/assets/fonts/Excalifont-Regular.ttf']) if (!fs.existsSync(f)) throw new Error('missing ' + f);\
       console.log('smoke: resvg (musl) + upstream canvas (durable state) + frontend + fonts OK')"
-
 ENV NODE_ENV=production \
-    HOST=0.0.0.0 \
-    PORT=3000 \
-    CANVAS_INTERNAL_PORT=3100 \
     EXCALIDRAW_DATA_DIR=/data
+
+# ---- canvas: only the upstream canvas, for gateways that set CANVAS_URL ----
+# Copies just the few compiled files the canvas role imports, so this image
+# is byte-identical across gateway-only commits (COPY is cached by content)
+# and a gateway deploy does not recreate the canvas container. Build it with
+# `--target canvas`.
+FROM base AS canvas
+COPY --chown=pizarra:pizarra --from=build /app/dist/canvas-main.js /app/dist/config.js ./dist/
+COPY --chown=pizarra:pizarra --from=build /app/dist/shared/network.js /app/dist/shared/logger.js ./dist/shared/
+COPY --chown=pizarra:pizarra --from=build /app/dist/gateway/infrastructure/upstream-canvas.js /app/dist/gateway/infrastructure/canvas-lock.js /app/dist/gateway/infrastructure/canvas-guardian.js ./dist/gateway/infrastructure/
+RUN node --check dist/canvas-main.js
+ENV PIZARRA_ROLE=canvas \
+    CANVAS_BIND_HOST=0.0.0.0 \
+    CANVAS_INTERNAL_PORT=3100
+EXPOSE 3100
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:3100/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+CMD ["node", "dist/canvas-main.js"]
+
+# ---- runtime (default, last stage): the gateway, with its own canvas unless CANVAS_URL is set ----
+FROM base AS runtime
+COPY --chown=pizarra:pizarra --from=build /app/dist ./dist
+RUN node --check dist/main.js
+ENV HOST=0.0.0.0 \
+    PORT=3000 \
+    CANVAS_INTERNAL_PORT=3100
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 CMD ["node", "dist/main.js"]
-
-LABEL org.opencontainers.image.source="https://github.com/FullFran/pizarra"
-LABEL org.opencontainers.image.description="pizarra: authenticated gateway (OAuth 2.1 + GitHub sign-in) for the mcp-excalidraw-server whiteboard"
-LABEL org.opencontainers.image.licenses="MIT"

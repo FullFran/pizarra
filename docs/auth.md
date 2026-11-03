@@ -79,6 +79,8 @@ In a container, mount `EXCALIDRAW_DATA_DIR` on a persistent volume so the genera
 
 **Zero-downtime deploys.** Run the canvas as its own container (`PIZARRA_ROLE=canvas`, one copy, replaced stop-then-start) and the gateway with `CANVAS_URL` pointing at it, both on the same data volume. Gateways then hold no state of their own: sessions are signed cookies, and everything else (clients, tokens, codes, consent tickets, device logins) is in `auth-store.json`, shared safely between copies. A new gateway can start next to the old one and take over once healthy. Never run two canvas copies on one data directory: each keeps the canvas in memory and the last to write would win.
 
+Build the canvas with the Dockerfile target `canvas`, which copies only the few files the canvas role imports. Pass `--provenance=false` and `SOURCE_DATE_EPOCH=0` (in Compose: `provenance: false` and `args: { SOURCE_DATE_EPOCH: "0" }`): the image ID is then identical across commits that do not touch the canvas, so `docker compose up` leaves the canvas container running while it replaces the gateway. Without them the ID changes on every build (build timestamp and provenance attestation) and the canvas restarts on every deploy.
+
 ## Signing in
 
 1. Any protected page without a session sends you to `/oauth/login`, which shows a **Sign in with GitHub** button.
