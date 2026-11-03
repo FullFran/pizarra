@@ -118,13 +118,14 @@ export class DeviceSignIn {
     if (record.outcome) return Promise.resolve();
     const now = this.clock.nowMs();
     if (now >= record.expiresAt) {
-      this.store.putDeviceLogin(nonce, { ...record, outcome: { kind: 'expired' } });
+      this.store.updateDeviceLogin(nonce, current => (current.outcome ? undefined : { ...current, outcome: { kind: 'expired' } }));
       return Promise.resolve();
     }
-    if (now < record.nextPollAt) return Promise.resolve();
-    // Claim this poll in the shared store first: the other gateway sees the
-    // next poll time and does not call GitHub inside the same interval.
-    this.store.putDeviceLogin(nonce, { ...record, nextPollAt: now + record.intervalMs });
+    // Claim this poll atomically in the shared store: only one gateway calls
+    // GitHub per interval; the others see the next poll time.
+    const claimed = this.store.updateDeviceLogin(nonce, current =>
+      current.outcome || now < current.nextPollAt ? undefined : { ...current, nextPollAt: now + current.intervalMs });
+    if (!claimed) return Promise.resolve();
     const run = (async () => {
       const next: DeviceLoginRecord = { ...record };
       try {
@@ -166,7 +167,8 @@ export class DeviceSignIn {
         this.polling.delete(nonce);
       }
       // Gone meanwhile (shown as failed, completed elsewhere or expired): leave it gone.
-      if (this.store.getDeviceLogin(nonce)) this.store.putDeviceLogin(nonce, next);
+      // An outcome recorded meanwhile wins over this poll's result.
+      this.store.updateDeviceLogin(nonce, current => (current.outcome ? undefined : { ...next, outcome: next.outcome }));
     })();
     this.polling.set(nonce, run);
     return run;
