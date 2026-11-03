@@ -16,15 +16,10 @@ export class AuthorizationCodes {
 
   /**
    * Burns the code for this client and returns it as it was before burning
-   * (`used` tells a replay). Undefined when unknown or issued to another
-   * client, which leaves it untouched.
+   * (`used` tells a replay), with the token family the code issues. Undefined
+   * when unknown or issued to another client, which leaves it untouched.
    */
   redeem(code: string | undefined, clientId: string): CodeRecord | undefined {
     return code ? this.store.useCode(this.hasher.sha256Hex(code), clientId) : undefined;
-  }
-
-  /** Records which token family the code issued, so a later replay revokes it. */
-  issued(code: string, familyId: string): void {
-    this.store.setCodeFamily(this.hasher.sha256Hex(code), familyId);
   }
 }

@@ -47,11 +47,11 @@ export interface TokenStore {
   clientCount(): number;
   getClient(clientId: string): RegisteredClient | undefined;
   addClient(client: RegisteredClient): void;
-  /** Opens a new refresh-token family (one per authorization code grant). */
-  createFamily(expiresAt: number): string;
+  /** Opens a refresh-token family (one per authorization code grant); a family already revoked stays revoked. */
+  createFamily(expiresAt: number, id?: string): string;
   isFamilyActive(familyId: string): boolean;
   extendFamily(familyId: string, expiresAt: number): void;
-  /** Revokes every access and refresh token of a family. */
+  /** Revokes every access and refresh token of a family, even one not created yet. */
   revokeFamily(familyId: string): void;
   putTokens(access: { hash: string; record: TokenRecord }, refresh: { hash: string; record: RefreshTokenRecord }): void;
   /** A live access token (not expired, family active), or undefined. */
@@ -60,15 +60,19 @@ export interface TokenStore {
   /** Marks a refresh token used; false when it was already used (or is unknown), so only one exchange wins. */
   markRefreshTokenUsed(hash: string): boolean;
   putCode(hash: string, record: CodeRecord): void;
-  /** Burns the code for this client and returns it as it was before (undefined if unknown or another client's). */
+  /**
+   * Burns the code for this client and returns it as it was before (undefined
+   * if unknown or another client's). The first burn also fixes the code's
+   * token family (`familyId`), so a replay can revoke it.
+   */
   useCode(hash: string, clientId: string): CodeRecord | undefined;
-  /** Remembers the family a code issued, so a replay can revoke it. */
-  setCodeFamily(hash: string, familyId: string): void;
   /** True the first time `key` is claimed, false afterwards (until `expiresAt`, seconds). */
   claimOnce(key: string, expiresAt: number): boolean;
   deviceLoginCount(): number;
   getDeviceLogin(nonce: string): DeviceLoginRecord | undefined;
   putDeviceLogin(nonce: string, record: DeviceLoginRecord): void;
+  /** Atomically replaces a live device login with `change(record)`; undefined from `change` (or no login) changes nothing. */
+  updateDeviceLogin(nonce: string, change: (record: DeviceLoginRecord) => DeviceLoginRecord | undefined): DeviceLoginRecord | undefined;
   deleteDeviceLogin(nonce: string): void;
 }
 

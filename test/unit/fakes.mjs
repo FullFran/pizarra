@@ -53,11 +53,11 @@ export function memoryStore(clock) {
     clientCount: () => clients.size,
     getClient: id => clients.get(id),
     addClient: client => { clients.set(client.clientId, client); },
-    createFamily: expiresAt => { const id = `fam${++n}`; families.set(id, { expiresAt }); return id; },
+    createFamily: (expiresAt, id = `fam${++n}`) => { const f = families.get(id); families.set(id, f ? { ...f, expiresAt: Math.max(f.expiresAt, expiresAt) } : { expiresAt }); return id; },
     isFamilyActive: id => { const f = families.get(id); return Boolean(f && !f.revokedAt && f.expiresAt > now()); },
     extendFamily: (id, expiresAt) => { const f = families.get(id); if (f) f.expiresAt = Math.max(f.expiresAt, expiresAt); },
     revokeFamily: id => {
-      const f = families.get(id); if (f) f.revokedAt = now();
+      const f = families.get(id); if (f) f.revokedAt = now(); else families.set(id, { expiresAt: now() + 86400, revokedAt: now() });
       for (const [k, r] of access) if (r.familyId === id) access.delete(k);
       for (const r of refresh.values()) if (r.familyId === id) r.usedAt ??= now();
     },
@@ -68,13 +68,16 @@ export function memoryStore(clock) {
     putCode: (hash, record) => { codes.set(hash, { ...record }); },
     useCode: (hash, clientId) => {
       const r = codes.get(hash); if (!r || r.clientId !== clientId) return undefined;
-      const before = { ...r }; r.used = true; return before;
+      const before = { ...r }; if (!r.used) { r.familyId = `fam${++n}`; before.familyId = r.familyId; } r.used = true; return before;
     },
-    setCodeFamily: (hash, familyId) => { const r = codes.get(hash); if (r) r.familyId = familyId; },
     claimOnce: (key, expiresAt) => { if (usedOnce.has(key)) return false; usedOnce.set(key, expiresAt); return true; },
     deviceLoginCount: () => [...deviceLogins.values()].filter(r => r.expiresAt > clock.nowMs()).length,
     getDeviceLogin: nonce => { const r = deviceLogins.get(nonce); return r && r.expiresAt > clock.nowMs() ? { ...r } : undefined; },
     putDeviceLogin: (nonce, record) => { deviceLogins.set(nonce, { ...record }); },
+    updateDeviceLogin: (nonce, change) => {
+      const r = deviceLogins.get(nonce); if (!r || r.expiresAt <= clock.nowMs()) return undefined;
+      const next = change({ ...r }); if (next) deviceLogins.set(nonce, { ...next }); return next;
+    },
     deleteDeviceLogin: nonce => { deviceLogins.delete(nonce); }
   };
   return store;

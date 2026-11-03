@@ -79,6 +79,9 @@ RUN node --input-type=module -e "await import('@modelcontextprotocol/server'); c
       console.log('smoke: resvg (musl) + upstream canvas (durable state) + frontend + fonts OK')"
 ENV NODE_ENV=production \
     EXCALIDRAW_DATA_DIR=/data
+LABEL org.opencontainers.image.source="https://github.com/FullFran/pizarra"
+LABEL org.opencontainers.image.description="pizarra: authenticated gateway (OAuth 2.1 + GitHub sign-in) for the mcp-excalidraw-server whiteboard"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # ---- canvas: only the upstream canvas, for gateways that set CANVAS_URL ----
 # Copies just the few compiled files the canvas role imports, so this image

@@ -80,8 +80,8 @@ export class TokenService {
       if (!verifier || !pkceS256Matches(verifier, record.codeChallenge, v => this.hasher.sha256Base64Url(v), (a, b) => this.hasher.constantTimeEqual(a, b))) {
         return fail(400, 'invalid_grant', 'PKCE verification failed');
       }
-      const familyId = this.store.createFamily(nowSeconds(this.clock) + this.settings.refreshTokenTtlSeconds);
-      this.codes.issued(request.code!, familyId);
+      // The family was fixed when the code burnt: a replay elsewhere may already have revoked it.
+      const familyId = this.store.createFamily(nowSeconds(this.clock) + this.settings.refreshTokenTtlSeconds, record.familyId);
       return { ok: true, body: this.issue(client.clientId, record.login, record.scope, record.resource, familyId) };
     }
 

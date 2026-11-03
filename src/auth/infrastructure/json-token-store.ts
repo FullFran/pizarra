@@ -1,5 +1,5 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { RegisteredClient } from '../domain/client.js';
 import type { CodeRecord, DeviceLoginRecord, RefreshTokenRecord, TokenRecord } from '../domain/token.js';
 import type { Clock, RandomSource, TokenStore } from '../application/ports.js';
@@ -35,6 +35,8 @@ const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_RETRY_MS = 5;
 /** Used codes are kept a little longer so a replay is still recognised. */
 const USED_CODE_GRACE_SECONDS = 600;
+/** A family revoked before it was created (a replay won the race) is remembered this long. */
+const REVOKED_FAMILY_TOMBSTONE_SECONDS = 86_400;
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -55,8 +57,10 @@ function own<T>(map: Record<string, T>, key: string): T | undefined {
  * Several gateways may share the file (two containers during a blue-green
  * deploy). Reads re-load the file when it changed on disk. Every change is
  * a transaction: take a lock directory next to the file (mkdir is atomic
- * across processes and containers on one host), re-load, change, write,
- * release. Single-use operations (codes, refresh tokens, tickets) decide
+ * across processes and containers on one host) holding the owner's token,
+ * re-load, change, write, release only if still the owner. A lock left by a
+ * process that died (older than 10 s) is broken under a separate break
+ * mutex, so only one waiter removes it. Single-use operations (codes, refresh tokens, tickets) decide
  * inside that transaction, so only one gateway can win them.
  */
 export class JsonFileTokenStore implements TokenStore {
@@ -64,9 +68,11 @@ export class JsonFileTokenStore implements TokenStore {
   /** Identity of the file version in `data` (inode, size, mtime); a rename always changes the inode. */
   private stamp = '';
   private readonly lockPath: string;
+  private readonly breakPath: string;
 
   constructor(private readonly path: string, private readonly clock: Clock = systemClock, private readonly random: RandomSource = cryptoRandom) {
     this.lockPath = `${path}.lock`;
+    this.breakPath = `${path}.lock.break`;
     this.refresh();
   }
 
@@ -99,45 +105,93 @@ export class JsonFileTokenStore implements TokenStore {
     return { ...emptyData(), ...parsed, version: 1 };
   }
 
-  private lock(): void {
+  private owner(lockPath: string): string | undefined {
+    try {
+      return readFileSync(join(lockPath, 'owner'), 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR') return undefined;
+      throw error;
+    }
+  }
+
+  /** Takes the lock; returns this holder's token. */
+  private lock(): string {
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+    const token = this.random.token(12);
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     for (;;) {
+      let created = false;
       try {
         mkdirSync(this.lockPath, { mode: 0o700 });
-        return;
+        created = true;
+        // Exclusive: if a breaker swapped the directory meanwhile, at most one process becomes its owner.
+        writeFileSync(join(this.lockPath, 'owner'), token, { mode: 0o600, flag: 'wx' });
+        return token;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        // Lost the race: the directory exists (EEXIST), was moved away (ENOENT) or got another owner (EEXIST).
+        if (code !== 'EEXIST' && !(created && code === 'ENOENT')) throw error;
       }
-      try {
-        if (Date.now() - statSync(this.lockPath).mtimeMs > STALE_LOCK_MS) {
-          rmSync(this.lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        continue;
-      }
+      if (this.breakIfStale()) continue;
       if (Date.now() > deadline) throw new Error(`Timed out waiting for the auth store lock ${this.lockPath}`);
       sleepSync(LOCK_RETRY_MS);
     }
   }
 
-  private unlock(): void {
-    rmSync(this.lockPath, { recursive: true, force: true });
+  private isStale(path: string): boolean {
+    try {
+      return Date.now() - statSync(path).mtimeMs > STALE_LOCK_MS;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+
+  /**
+   * Removes the lock if its holder died (stale); true when the caller should
+   * retry at once. Breaking takes its own mutex (`.lock.break`), and the
+   * staleness is checked again inside it: while a stale lock exists nobody
+   * can create a new one, and no other breaker can act, so exactly one
+   * process removes exactly the stale lock.
+   */
+  private breakIfStale(): boolean {
+    if (!this.isStale(this.lockPath)) return false;
+    try {
+      mkdirSync(this.breakPath, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      // A breaker that died mid-break (it holds this for microseconds).
+      if (this.isStale(this.breakPath)) rmSync(this.breakPath, { recursive: true, force: true });
+      return false;
+    }
+    try {
+      if (this.isStale(this.lockPath)) rmSync(this.lockPath, { recursive: true, force: true });
+    } finally {
+      rmSync(this.breakPath, { recursive: true, force: true });
+    }
+    return true;
+  }
+
+  private unlock(token: string): void {
+    // Only the owner removes it: after a stale break the name may hold someone else's lock.
+    if (this.owner(this.lockPath) === token) rmSync(this.lockPath, { recursive: true, force: true });
   }
 
   /** Runs `change` on the current file contents under the lock, then writes the result. */
   private transact<T>(change: (data: StoreData) => T): T {
-    this.lock();
+    const token = this.lock();
     try {
       this.data = this.load();
       this.prune();
       const result = change(this.data);
       this.save();
       return result;
+    } catch (error) {
+      // `data` may hold a change that never reached the file: re-load on the next read.
+      this.stamp = '';
+      throw error;
     } finally {
-      this.unlock();
+      this.unlock(token);
     }
   }
 
@@ -189,9 +243,12 @@ export class JsonFileTokenStore implements TokenStore {
     this.transact(data => { data.clients[client.clientId] = client; });
   }
 
-  createFamily(expiresAt: number): string {
-    const id = this.random.token(16);
-    this.transact(data => { data.families[id] = { expiresAt }; });
+  createFamily(expiresAt: number, id: string = this.random.token(16)): string {
+    this.transact(data => {
+      const existing = own(data.families, id);
+      // A family revoked before it existed (a replay won the race) stays revoked.
+      data.families[id] = existing ? { ...existing, expiresAt: Math.max(existing.expiresAt, expiresAt) } : { expiresAt };
+    });
     return id;
   }
 
@@ -212,6 +269,7 @@ export class JsonFileTokenStore implements TokenStore {
       const now = this.now();
       const family = own(data.families, familyId);
       if (family) family.revokedAt = now;
+      else data.families[familyId] = { expiresAt: now + REVOKED_FAMILY_TOMBSTONE_SECONDS, revokedAt: now };
       for (const [key, record] of Object.entries(data.accessTokens)) if (record.familyId === familyId) delete data.accessTokens[key];
       for (const record of Object.values(data.refreshTokens)) if (record.familyId === familyId) record.usedAt ??= now;
     });
@@ -255,15 +313,24 @@ export class JsonFileTokenStore implements TokenStore {
       const record = own(data.codes, hash);
       if (!record || record.clientId !== clientId) return undefined;
       const before = { ...record };
+      if (!record.used) {
+        // The family is fixed when the code burns, so a replay on another
+        // gateway can revoke it even before its tokens exist.
+        record.familyId = this.random.token(16);
+        before.familyId = record.familyId;
+      }
       record.used = true;
       return before;
     });
   }
 
-  setCodeFamily(hash: string, familyId: string): void {
-    this.transact(data => {
-      const record = own(data.codes, hash);
-      if (record) record.familyId = familyId;
+  updateDeviceLogin(nonce: string, change: (record: DeviceLoginRecord) => DeviceLoginRecord | undefined): DeviceLoginRecord | undefined {
+    return this.transact(data => {
+      const record = own(data.deviceLogins, nonce);
+      if (!record || record.expiresAt <= this.clock.nowMs()) return undefined;
+      const next = change({ ...record });
+      if (next) data.deviceLogins[nonce] = next;
+      return next;
     });
   }
 

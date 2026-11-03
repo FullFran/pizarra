@@ -82,10 +82,9 @@ test('an authorization code is single use across copies', t => {
   assert.equal(b.useCode('h1', 'other-client'), undefined, 'another client neither sees nor burns the code');
   const first = b.useCode('h1', 'c');
   assert.equal(first?.used, false, 'first presentation sees an unused code');
-  b.setCodeFamily('h1', 'fam1');
   const second = a.useCode('h1', 'c');
   assert.equal(second?.used, true, 'second presentation, on the other copy, sees it used');
-  assert.equal(second?.familyId, 'fam1', 'and knows which family to revoke');
+  assert.equal(second?.familyId, first.familyId, 'and knows which family to revoke');
   assert.equal(a.useCode('missing', 'c'), undefined);
 });
 
@@ -175,4 +174,49 @@ test('concurrent writers in separate processes lose nothing', async t => {
   }));
   await Promise.all(runs);
   assert.equal(new JsonFileTokenStore(path, clock).clientCount(), writers * each);
+});
+
+test('breaking a stale lock lets exactly one process in (single use stays exact after a crash)', async t => {
+  const path = scratch(t);
+  const racers = 6;
+  const rounds = 8;
+  const script = `
+    const { JsonFileTokenStore } = await import(${JSON.stringify(STORE_MODULE)});
+    const store = new JsonFileTokenStore(${JSON.stringify(path)});
+    const key = process.argv[1];
+    while (Date.now() < Number(process.argv[2])) {}
+    process.stdout.write(store.claimOnce(key, 4102444800) ? 'won' : 'lost');`;
+  for (let round = 0; round < rounds; round++) {
+    // A holder that died: its lock directory is left behind, long stale.
+    mkdirSync(`${path}.lock`, { recursive: true });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${path}.lock`, old, old);
+    const start = Date.now() + 400;
+    const results = await Promise.all(Array.from({ length: racers }, () => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script, `k${round}`, String(start)], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', d => { out += d; });
+      child.stderr.on('data', d => { err += d; });
+      child.on('exit', code => (code === 0 ? resolve(out) : reject(new Error(`racer exited ${code}: ${err}`))));
+    })));
+    assert.equal(results.filter(r => r === 'won').length, 1, `round ${round}: ${results.join(',')}`);
+  }
+});
+
+test('a replay that lands between redeeming a code and issuing its tokens still revokes them', t => {
+  const path = scratch(t);
+  const a = new JsonFileTokenStore(path, clock);
+  const b = new JsonFileTokenStore(path, clock);
+  a.putCode('h', code());
+  const first = a.useCode('h', 'c');
+  assert.equal(first?.used, false);
+  assert.ok(first?.familyId, 'the family is chosen when the code is burnt');
+  const replay = b.useCode('h', 'c');
+  assert.equal(replay?.familyId, first.familyId, 'the replay on the other copy knows the family');
+  b.revokeFamily(replay.familyId);
+  a.createFamily(now + 7200, first.familyId);
+  a.putTokens({ hash: 'acc', record: token(first.familyId) }, { hash: 'ref', record: token(first.familyId) });
+  assert.equal(a.isFamilyActive(first.familyId), false, 'a family revoked before it was created stays revoked');
+  assert.equal(b.getAccessToken('acc'), undefined);
 });
