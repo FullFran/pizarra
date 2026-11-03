@@ -1,0 +1,39 @@
+{
+  "name": "pizarra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authenticated gateway for a shared handwriting whiteboard: OAuth 2.1 + GitHub sign-in in front of the unmodified mcp-excalidraw-server.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Fran (FullFran)",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js",
+    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:auth": "node scripts/check-auth.mjs",
+    "test:mcp-http": "node scripts/check-mcp-http.mjs",
+    "test:proxy": "node scripts/check-proxy.mjs",
+    "test": "npm run build && npm run test:unit && npm run test:auth && npm run test:mcp-http && npm run test:proxy"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "express": "4.22.3",
+    "mcp-excalidraw-server": "2.1.2",
+    "ws": "8.22.1"
+  },
+  "devDependencies": {
+    "@types/express": "4.17.25",
+    "@types/node": "20.19.43",
+    "@types/ws": "8.18.2",
+    "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FullFran/pizarra.git"
+  }
+}

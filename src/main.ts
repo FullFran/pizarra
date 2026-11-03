@@ -1,0 +1,90 @@
+/**
+ * Composition root: reads configuration, starts the upstream canvas on
+ * loopback, wires the auth module into the gateway and listens.
+ */
+import { createServer } from 'node:http';
+import net from 'node:net';
+import { buildAuth, resolveAuthConfig } from './auth/index.js';
+import { resolveGatewayConfig } from './config.js';
+import { CanvasProxy } from './gateway/infrastructure/canvas-proxy.js';
+import { UpstreamCanvasSupervisor } from './gateway/infrastructure/upstream-canvas.js';
+import { loadUpstreamMcpFactory } from './gateway/infrastructure/upstream-mcp.js';
+import { MCP_HTTP_PATH } from './gateway/presentation/http/mcp-route.js';
+import { createGatewayApp } from './gateway/presentation/http/app.js';
+import { createLogger } from './shared/logger.js';
+
+const logger = createLogger();
+
+function freeLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+function formatHost(host: string): string {
+  return host.includes(':') ? `[${host}]` : host;
+}
+
+async function main(): Promise<void> {
+  const config = resolveGatewayConfig(process.env);
+  const authConfig = resolveAuthConfig(config.host, process.env, { resourcePaths: [MCP_HTTP_PATH] });
+  if (authConfig.mode === 'oauth') {
+    for (const warning of authConfig.warnings) logger.warn(warning);
+  } else if (authConfig.insecure) {
+    logger.warn(`Authentication is OFF on non-loopback HOST=${config.host} (ALLOW_INSECURE_NO_AUTH=true): anyone who can reach this address can read and change the canvas.`);
+  }
+  const auth = authConfig.mode === 'oauth' ? buildAuth(authConfig, { logger }) : undefined;
+
+  const upstream = new UpstreamCanvasSupervisor({ port: config.canvasPort || await freeLoopbackPort(), logger });
+  process.on('exit', () => upstream.killNow());
+  await upstream.start();
+  const mcpFactory = await loadUpstreamMcpFactory(upstream.baseUrl);
+
+  const { app, onUpgrade } = createGatewayApp({
+    bindHost: config.host,
+    ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
+    trustProxy: config.trustProxy,
+    ...(auth ? { auth: { router: auth.router, authenticator: auth.authenticator, resource: auth.settings.resources[0]! } } : {}),
+    mcpFactory,
+    upstream,
+    proxy: new CanvasProxy(upstream, logger),
+    logger
+  });
+  const server = createServer(app);
+  server.on('upgrade', onUpgrade);
+
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`Received ${signal}, shutting down`);
+    server.close();
+    server.closeAllConnections?.();
+    void upstream.stop().finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(config.port, config.host, () => resolve());
+  });
+  const local = `http://${formatHost(config.host)}:${config.port}`;
+  logger.info('pizarra gateway listening', {
+    url: local,
+    mcp: `${config.publicBaseUrl ?? local}${MCP_HTTP_PATH}`,
+    auth: auth ? `oauth (issuer ${auth.settings.issuer}, ${auth.settings.allowedLogins.size} allowed login(s))` : 'off'
+  });
+}
+
+main().catch(error => {
+  logger.error(`Startup failed: ${(error as Error).message}`);
+  process.exit(1);
+});
