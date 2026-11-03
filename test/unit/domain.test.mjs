@@ -127,3 +127,36 @@ test('proxied paths must be plain', () => {
   for (const path of ['/', '/api/elements', '/assets/index-abc.js', '/api/elements/a.b']) assert.equal(isPlainPath(path), true, path);
   for (const path of ['/api/../health', '/./x', '/a/%2e%2e/b', '/a%2Fb', '/a\\b', '/a%5cb', '/a%00', 'x']) assert.equal(isPlainPath(path), false, path);
 });
+
+// ChatGPT's CIMD document prefers private_key_jwt but also lists "none" in
+// token_endpoint_auth_methods_supported; we only support public clients, so a
+// document that offers "none" must be accepted as a public client.
+test('CIMD: a document offering "none" among several methods is a public client', () => {
+  const id = 'https://chatgpt.com/oauth/abc/client.json';
+  const doc = {
+    client_id: id,
+    client_name: 'ChatGPT',
+    redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect'],
+    token_endpoint_auth_method: 'private_key_jwt',
+    token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+    jwks_uri: 'https://chatgpt.com/oauth/jwks.json'
+  };
+  const client = clientFromMetadataDocument(id, JSON.stringify(doc));
+  assert.equal(client.authMethod, 'none');
+  assert.deepEqual(client.redirectUris, ['https://chatgpt.com/connector_platform_oauth_redirect']);
+});
+
+test('CIMD: a document that only allows confidential methods is still refused', () => {
+  const id = 'https://app.example/client.json';
+  const base = { client_id: id, redirect_uris: ['https://app.example/cb'] };
+  for (const extra of [
+    { token_endpoint_auth_method: 'private_key_jwt' },
+    { token_endpoint_auth_method: 'private_key_jwt', token_endpoint_auth_methods_supported: ['private_key_jwt'] },
+    { token_endpoint_auth_methods_supported: ['client_secret_basic'] },
+    { token_endpoint_auth_methods_supported: 'none' }
+  ]) {
+    assert.throws(() => clientFromMetadataDocument(id, JSON.stringify({ ...base, ...extra })), /public clients/, JSON.stringify(extra));
+  }
+  // The plain public case keeps working.
+  assert.equal(clientFromMetadataDocument(id, JSON.stringify(base)).authMethod, 'none');
+});

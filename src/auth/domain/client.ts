@@ -103,6 +103,22 @@ export function isCimdClientId(clientId: string): boolean {
 }
 
 /**
+ * Whether a metadata document lets us treat its client as public (PKCE, no
+ * client authentication). Documents may list several methods in
+ * `token_endpoint_auth_methods_supported` and give a preference in the legacy
+ * singular field; ChatGPT, for example, prefers `private_key_jwt` but also
+ * lists `none`. We only support `none`, so it must be offered somewhere: in the
+ * list when there is one, otherwise in the singular field (absent means none).
+ */
+function offersPublicClientAuth(document: Record<string, unknown>): boolean {
+  const supported = document.token_endpoint_auth_methods_supported;
+  if (supported !== undefined) {
+    return Array.isArray(supported) && supported.includes('none');
+  }
+  return (document.token_endpoint_auth_method ?? 'none') === 'none';
+}
+
+/**
  * Validates a fetched Client ID Metadata Document
  * (draft-ietf-oauth-client-id-metadata-document): it must name itself, be a
  * public client and list allowed redirect URIs.
@@ -119,8 +135,7 @@ export function clientFromMetadataDocument(clientId: string, body: string): Reso
   if (document.client_id !== clientId) {
     throw new ClientError('invalid_client', 'client metadata document client_id does not match its URL');
   }
-  const method = document.token_endpoint_auth_method ?? 'none';
-  if (method !== 'none') {
+  if (!offersPublicClientAuth(document)) {
     throw new ClientError('invalid_client', 'only public clients (token_endpoint_auth_method "none") are supported for metadata documents');
   }
   if (document.client_secret !== undefined) {
