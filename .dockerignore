@@ -1,8 +1,10 @@
 node_modules
 dist
+vendor
 .git
 odd
 test
 scripts
+!scripts/build-upstream.sh
 docs
 *.md

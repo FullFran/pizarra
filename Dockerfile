@@ -11,10 +11,24 @@
 #   - resvg's native prebuild is swapped to musl for the alpine runtime,
 #     so the upstream's headless PNG export works.
 
+# ---- upstream: build the unmodified canvas at the commit pinned in upstream.json ----
+# Upstream main has durable canvas state but no npm release yet, and its
+# `dist/` is only produced by `prepublishOnly`, so it is cloned, checked
+# against the pinned commit, built with its own lockfile and packed. The
+# same script builds vendor/ for local development. Same Node line as local
+# development, so the packed tarball matches package-lock.json's integrity.
+FROM node:24-slim AS upstream
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY upstream.json ./
+COPY scripts/build-upstream.sh ./scripts/
+RUN ./scripts/build-upstream.sh && npm cache clean --force
+
 # ---- build: compile TypeScript, then keep production dependencies only ----
-FROM node:22-slim AS build
+FROM node:24-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY --from=upstream /app/vendor ./vendor
 RUN npm ci && npm cache clean --force
 COPY tsconfig.json ./
 COPY src ./src
@@ -32,7 +46,8 @@ RUN VERS=$(node -p "require('./node_modules/@resvg/resvg-js/package.json').versi
     curl -fsSL "https://registry.npmjs.org/@resvg/resvg-js-linux-$ARCH-musl/-/resvg-js-linux-$ARCH-musl-$VERS.tgz" -o /tmp/resvg.tgz && \
     tar xz -C /tmp --strip-components=1 -f /tmp/resvg.tgz "package/resvgjs.linux-$ARCH-musl.node" && \
     cp /tmp/resvgjs.linux-$ARCH-musl.node node_modules/@resvg/resvg-js/ && \
-    rm -f /tmp/resvg.tgz /tmp/resvgjs.linux-$ARCH-musl.node
+    rm -f /tmp/resvg.tgz /tmp/resvgjs.linux-$ARCH-musl.node && \
+    rm -rf vendor
 
 # ---- runtime: alpine + Node from the alpine repo (no npm at runtime) ----
 FROM alpine:3.23 AS runtime
@@ -44,7 +59,8 @@ RUN addgroup -S -g 1001 pizarra && \
 ENV HOME=/home/pizarra
 WORKDIR /app
 USER pizarra
-# Durable auth state (token store, generated signing secret, mode 0600).
+# Durable state: auth (token store, generated signing secret, mode 0600) and
+# the canvas in /data/canvas.
 VOLUME ["/data"]
 
 COPY --chown=pizarra:pizarra --from=build /app/package.json ./package.json
@@ -59,8 +75,8 @@ RUN node --check dist/main.js && \
       const r = require('@resvg/resvg-js');\
       const png = new r.Resvg('<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"red\"/></svg>').render().asPng();\
       if (png.length < 40) throw new Error('resvg PNG too small');\
-      for (const f of ['node_modules/mcp-excalidraw-server/dist/server.js', 'node_modules/mcp-excalidraw-server/dist/frontend/index.html', 'node_modules/mcp-excalidraw-server/assets/fonts/Excalifont-Regular.ttf']) if (!fs.existsSync(f)) throw new Error('missing ' + f);\
-      console.log('smoke: resvg (musl) + upstream canvas + frontend + fonts OK')"
+      for (const f of ['node_modules/mcp-excalidraw-server/dist/server.js', 'node_modules/mcp-excalidraw-server/dist/core/canvas-persistence.js', 'node_modules/mcp-excalidraw-server/dist/frontend/index.html', 'node_modules/mcp-excalidraw-server/assets/fonts/Excalifont-Regular.ttf']) if (!fs.existsSync(f)) throw new Error('missing ' + f);\
+      console.log('smoke: resvg (musl) + upstream canvas (durable state) + frontend + fonts OK')"
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \

@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Logger } from '../../shared/logger.js';
 import type { CanvasUpstream } from '../application/ports.js';
+import { clearStaleCanvasLock } from './canvas-lock.js';
 
 const require = createRequire(import.meta.url);
 /** Upstream canvas entry point (the package has no `exports`, so the subpath resolves). */
@@ -18,6 +19,8 @@ export interface SupervisorOptions {
   port: number;
   logger: Logger;
   env?: Record<string, string | undefined>;
+  /** Durable canvas state directory (upstream's `EXCALIDRAW_DATA_DIR`); none keeps the canvas in memory. */
+  dataDir?: string;
   /** How long one start may take to answer /health. */
   startTimeoutMs?: number;
   /** Upper bound on the delay between restarts after a crash. */
@@ -42,6 +45,7 @@ export class UpstreamCanvasSupervisor implements CanvasUpstream {
   private readonly env: Record<string, string | undefined>;
   private readonly startTimeoutMs: number;
   private readonly maxRestartDelayMs: number;
+  private readonly dataDir: string | undefined;
 
   constructor(options: SupervisorOptions) {
     this.port = options.port;
@@ -49,6 +53,7 @@ export class UpstreamCanvasSupervisor implements CanvasUpstream {
     this.env = options.env ?? process.env;
     this.startTimeoutMs = options.startTimeoutMs ?? 15000;
     this.maxRestartDelayMs = options.maxRestartDelayMs ?? 30000;
+    this.dataDir = options.dataDir;
   }
 
   get baseUrl(): string {
@@ -79,6 +84,11 @@ export class UpstreamCanvasSupervisor implements CanvasUpstream {
       if (value !== undefined) env[name] = value;
     }
     Object.assign(env, { HOST: this.host, PORT: String(this.port), EXCALIDRAW_NO_AUTOSTART: '1' });
+    if (this.dataDir) {
+      env.EXCALIDRAW_DATA_DIR = this.dataDir;
+      const lock = clearStaleCanvasLock(this.dataDir);
+      if (lock === 'cleared') this.logger.warn('Cleared a stale canvas data-directory lock', { dir: this.dataDir });
+    }
     const child = spawn(process.execPath, ['--import', GUARDIAN, UPSTREAM_SERVER_ENTRY], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.child = child;
     const forward = (stream: NodeJS.ReadableStream | null) => {

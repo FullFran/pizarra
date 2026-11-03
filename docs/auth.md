@@ -4,7 +4,7 @@ The pizarra gateway protects everything the whiteboard serves — the MCP endpoi
 
 ## Topology
 
-The canvas itself is the unmodified [`mcp-excalidraw-server`](https://www.npmjs.com/package/mcp-excalidraw-server) package (pinned `2.1.2`), which has no authentication. The gateway starts it as a child process listening **only on `127.0.0.1`** on an internal port (`CANVAS_INTERNAL_PORT`, a free port by default, `3100` in the image), with none of the gateway's auth settings in its environment, restarts it if it crashes, and stops it on exit. The gateway is the only public listener: it answers `/oauth/*`, the metadata documents, `/mcp` and `/health` itself, and reverse-proxies everything else (the canvas UI, `/api/*` and the WebSocket) to the canvas **after** authentication. The browser's cookie and `Authorization` header are not forwarded to the canvas, and cookies the canvas might set are dropped. Paths with dot segments, backslashes or encoded `.`/`/`/`\` are refused with `400` before proxying.
+The canvas itself is the unmodified [`mcp-excalidraw-server`](https://github.com/yctimlin/mcp_excalidraw) (pinned to the upstream commit in `upstream.json`, see the README), which has no authentication. The gateway starts it as a child process listening **only on `127.0.0.1`** on an internal port (`CANVAS_INTERNAL_PORT`, a free port by default, `3100` in the image), with none of the gateway's auth settings in its environment (it only gets its own data directory), restarts it if it crashes, and stops it on exit. The gateway is the only public listener: it answers `/oauth/*`, the metadata documents, `/mcp` and `/health` itself, and reverse-proxies everything else (the canvas UI, `/api/*` and the WebSocket) to the canvas **after** authentication. The browser's cookie and `Authorization` header are not forwarded to the canvas, and cookies the canvas might set are dropped. Paths with dot segments, backslashes or encoded `.`/`/`/`\` are refused with `400` before proxying.
 
 The auth code is its own bounded context (`src/auth/`): it knows nothing about the canvas or the proxy, the protected resources it issues tokens for are configuration (today one: `${PUBLIC_BASE_URL}/mcp`), and the gateway asks it one question through a port: *is this request authenticated, and as whom?*
 
@@ -33,7 +33,9 @@ On a loopback bind, GitHub or auth variables without `AUTH_MODE=oauth` are ignor
 | `PUBLIC_BASE_URL` | yes | Public origin, e.g. `https://board.example.com`. Must be `https` (plain `http` only for `127.0.0.1`/`localhost`) and must not have a path. It is the OAuth issuer; the protected resource is `${PUBLIC_BASE_URL}/mcp`. |
 | `GITHUB_CLIENT_ID` | yes | Client ID of your GitHub OAuth app (public; not a secret). |
 | `ALLOWED_GITHUB_LOGINS` | yes | Comma-separated GitHub logins allowed to sign in, case-insensitive, e.g. `FullFran`. **There is no default**: if it is unset the server refuses to start, so nobody gets in by accident. |
-| `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`). The name and file format are the fork's, so an existing volume keeps working. **The canvas itself is not stored here**: upstream `2.1.2` keeps elements in memory, so they are lost when the container restarts. |
+| `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`), with the fork's names and format. It also turns on durable canvas state, in `canvas/` below it (see `CANVAS_DATA_DIR`). |
+| `CANVAS_DATA_DIR` | no | Where the canvas keeps its durable state (upstream's `EXCALIDRAW_DATA_DIR`). Default `$EXCALIDRAW_DATA_DIR/canvas`. The fork kept `canvas-state-v1.json` and `blobs/` at the data directory's root: move them into `canvas/`, or set `CANVAS_DATA_DIR` to the root, to keep a fork-era drawing. |
+| `EXCALIDRAW_EXPORT_DIR` | no | The only directory upstream's MCP file tools may read and write. Default `$EXCALIDRAW_DATA_DIR/files` (upstream's own default is the working directory, i.e. the application). |
 | `GITHUB_APP_NAME` | no | The name you gave the GitHub OAuth app. The sign-in page shows it, so you can check GitHub names the same app. |
 | `AUTH_SECRET` or `AUTH_SECRET_FILE` | no | Signing secret for session cookies, the sign-in binding cookie and consent forms, at least 32 characters. When neither is set, the server generates one (48 random bytes) in `$EXCALIDRAW_DATA_DIR/auth-secret` on first start and reuses it afterwards. An explicit value wins. Changing or deleting it signs everyone out. |
 | `TRUST_PROXY` | behind a proxy | Set it (e.g. `loopback`) when a reverse proxy you control terminates TLS, so rate limits see client IPs. |
@@ -70,7 +72,7 @@ EXCALIDRAW_DATA_DIR=/var/lib/excalidraw \
 node dist/main.js
 ```
 
-In a container, mount `EXCALIDRAW_DATA_DIR` on a persistent volume so the generated secret and tokens survive redeploys; there is no secret to put in the deployment's environment.
+In a container, mount `EXCALIDRAW_DATA_DIR` on a persistent volume so the generated secret, tokens and canvas survive redeploys; there is no secret to put in the deployment's environment.
 
 ## Signing in
 
@@ -175,7 +177,7 @@ Assumptions:
 
 - TLS is terminated by a reverse proxy you control, and `PUBLIC_BASE_URL` is the URL people actually use. Set `TRUST_PROXY` only for that proxy.
 - The data directory is private to the server's user: it holds the signing secret (`auth-secret`, `0600`) and the token store. There is no GitHub client secret.
-- One gateway owns the data directory. Run a single replica.
+- One gateway owns the data directory. Run a single replica. The canvas holds a lock on its directory; when the canvas was killed hard (for example `docker kill`), the gateway removes the lock left behind if its owner process is gone, before starting a new canvas (inside a fresh container the new canvas would otherwise get the dead one's pid and refuse to start).
 - Nothing else untrusted runs on the same host or in the same container: the canvas port on `127.0.0.1` has no authentication of its own. In the image only the gateway and the canvas run.
 
 Out of scope:
@@ -185,5 +187,4 @@ Out of scope:
 - Token introspection and revocation endpoints (RFC 7662 / 7009), `private_key_jwt` clients, OpenID Connect.
 - Rate limiting shared across processes, and protection against volumetric denial of service (use the proxy). In particular, someone who can reach the server from 4 or more IPs can fill the 20 pending device logins and delay sign-ins for up to 15 minutes (restarting the server clears them; existing sessions and tokens keep working).
 - Upstream's CLI (`excalidraw-canvas …`) and stdio MCP server talking to a *remote* pizarra: they send no token. Use `/mcp` for remote agents.
-- Persisting the canvas across restarts (upstream `2.1.2` keeps it in memory).
 - With auth off on a local machine, the internal canvas port (like any local web server) is reachable by other local processes; only `/mcp` has the DNS-rebinding guard.

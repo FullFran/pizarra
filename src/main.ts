@@ -2,6 +2,7 @@
  * Composition root: reads configuration, starts the upstream canvas on
  * loopback, wires the auth module into the gateway and listens.
  */
+import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import net from 'node:net';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
@@ -41,10 +42,15 @@ async function main(): Promise<void> {
   }
   const auth = authConfig.mode === 'oauth' ? buildAuth(authConfig, { logger }) : undefined;
 
-  const upstream = new UpstreamCanvasSupervisor({ port: config.canvasPort || await freeLoopbackPort(), logger });
+  const upstream = new UpstreamCanvasSupervisor({
+    port: config.canvasPort || await freeLoopbackPort(),
+    logger,
+    ...(config.canvasDataDir ? { dataDir: config.canvasDataDir } : {})
+  });
   process.on('exit', () => upstream.killNow());
   await upstream.start();
-  const mcpFactory = await loadUpstreamMcpFactory(upstream.baseUrl);
+  if (config.exportDir) mkdirSync(config.exportDir, { recursive: true, mode: 0o700 });
+  const mcpFactory = await loadUpstreamMcpFactory(upstream.baseUrl, config.exportDir ? { exportDir: config.exportDir } : {});
 
   const { app, onUpgrade } = createGatewayApp({
     bindHost: config.host,
@@ -80,6 +86,7 @@ async function main(): Promise<void> {
   logger.info('pizarra gateway listening', {
     url: local,
     mcp: `${config.publicBaseUrl ?? local}${MCP_HTTP_PATH}`,
+    canvasState: config.canvasDataDir ?? 'in memory (set EXCALIDRAW_DATA_DIR to keep it)',
     auth: auth ? `oauth (issuer ${auth.settings.issuer}, ${auth.settings.allowedLogins.size} allowed login(s))` : 'off'
   });
 }

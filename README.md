@@ -1,6 +1,6 @@
 # pizarra
 
-A shared handwriting whiteboard for humans and agents. pizarra is an authenticated gateway in front of the unmodified [`mcp-excalidraw-server`](https://www.npmjs.com/package/mcp-excalidraw-server) (pinned `2.1.2`): you draw on the Excalidraw canvas in a browser, and agents (ChatGPT, Claude Code, Codex, …) read and draw on the same board through MCP.
+A shared handwriting whiteboard for humans and agents. pizarra is an authenticated gateway in front of the unmodified [`mcp-excalidraw-server`](https://github.com/yctimlin/mcp_excalidraw) (pinned to an upstream commit, see [Upstream pin](#upstream-pin)): you draw on the Excalidraw canvas in a browser, and agents (ChatGPT, Claude Code, Codex, …) read and draw on the same board through MCP.
 
 - `/mcp`: upstream's MCP tools over Streamable HTTP, for 2026-07-28 and 2025-era clients.
 - OAuth 2.1 authorization server: PKCE S256, RFC 9207 `iss`, RFC 8707 `resource`, RFC 9728/8414 metadata, rotating refresh tokens, Client ID Metadata Documents and Dynamic Client Registration.
@@ -33,6 +33,7 @@ The code is hexagonal, with dependencies pointing inwards (checked by `test/unit
 ## Run locally
 
 ```bash
+npm run build:upstream   # once per pin: builds vendor/mcp-excalidraw-server-<commit>.tgz
 npm ci
 npm run build
 npm start            # http://127.0.0.1:3000, auth off on loopback
@@ -59,7 +60,19 @@ docker run -p 3000:3000 -v pizarra-data:/data \
 
 For Dokploy, use [`compose.dokploy.yml`](compose.dokploy.yml) and set `PUBLIC_BASE_URL`, `GITHUB_CLIENT_ID` and `ALLOWED_GITHUB_LOGINS` in its environment; none of them is secret. TLS is terminated by the proxy in front.
 
-**Known limit:** upstream `2.1.2` keeps the canvas in memory, so the drawing is lost when the container restarts. Tokens, registered clients and the signing secret persist in `/data`.
+Everything durable lives in the `/data` volume: tokens, registered clients and the signing secret at its root, the canvas (elements, files, snapshots) in `/data/canvas`, and files written by the MCP file tools in `/data/files`. The canvas survives restarts of the canvas process, of the gateway and of the container.
+
+## Upstream pin
+
+Upstream is used unmodified, but not from npm: the `2.1.2` npm release has no durable canvas state, while upstream `main` does (unreleased; its `package.json` still says `2.1.2`). The commit is recorded once, in [`upstream.json`](upstream.json). `scripts/build-upstream.sh` clones that commit, checks that `HEAD` is exactly it, runs upstream's own `npm ci && npm run build` and `npm pack`s it into `vendor/` (gitignored), from where `package.json` installs it as a `file:` tarball; the Docker image runs the same script in a build stage. The pack is reproducible, so `package-lock.json`'s integrity hash also checks the image's build. `test/unit/upstream.test.mjs` checks that `upstream.json`, `package.json`, the lockfile and the Dockerfile agree.
+
+To bump it:
+
+1. Put the new full commit SHA in `upstream.json`.
+2. `npm run build:upstream && npm install --save-exact ./vendor/mcp-excalidraw-server-<first 12 hex digits>.tgz`
+3. `npm test`, then rebuild the image.
+
+Once upstream publishes an npm release that contains durable state, switch back to the registry version (`npm install --save-exact mcp-excalidraw-server@<version>`), drop `upstream.json`, the script, the Docker `upstream` stage and the pin test.
 
 ## License
 

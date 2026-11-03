@@ -1,0 +1,6 @@
+{
+  "name": "mcp-excalidraw-server",
+  "repository": "https://github.com/yctimlin/mcp_excalidraw.git",
+  "commit": "66b768b47914987bb77a49e1fd1922e7f6deb0fe",
+  "note": "Unreleased upstream main (package.json still says 2.1.2) with durable canvas state. Go back to the npm release once one contains this commit. Bump: edit commit, run scripts/build-upstream.sh, npm install the new tarball."
+}

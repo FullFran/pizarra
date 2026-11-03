@@ -4,7 +4,8 @@
 # for the domain configured in its UI/API, so no ports are published here.
 # No secret is needed: GitHub sign-in uses the device flow (public client ID
 # only) and the session-signing secret is generated on first start inside
-# the data volume (mode 0600). See docs/auth.md.
+# the data volume (mode 0600). The canvas is kept in the same volume
+# (/data/canvas). See docs/auth.md.
 #
 # Set in Dokploy's environment (none of them is secret):
 #   PUBLIC_BASE_URL       e.g. https://pizarra.fullfran.com
