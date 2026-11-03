@@ -40,33 +40,13 @@ function onStopSignals(stop: (signal: string) => void): void {
   process.on('SIGINT', () => stop('SIGINT'));
 }
 
-/** PIZARRA_ROLE=canvas: only the upstream canvas, on CANVAS_BIND_HOST:CANVAS_INTERNAL_PORT. */
-async function runCanvas(config: ReturnType<typeof resolveGatewayConfig>): Promise<void> {
-  const canvas = new UpstreamCanvasSupervisor({
-    port: config.canvasPort,
-    bindHost: config.canvasBindHost,
-    logger,
-    ...(config.canvasDataDir ? { dataDir: config.canvasDataDir } : {})
-  });
-  process.on('exit', () => canvas.killNow());
-  let stopping = false;
-  onStopSignals(signal => {
-    if (stopping) return;
-    stopping = true;
-    logger.info(`Received ${signal}, stopping the canvas`);
-    void canvas.stop().finally(() => process.exit(0));
-    setTimeout(() => process.exit(0), 5000).unref();
-  });
-  await canvas.start();
-  logger.info('pizarra canvas listening', {
-    url: `http://${formatHost(config.canvasBindHost)}:${config.canvasPort}`,
-    canvasState: config.canvasDataDir ?? 'in memory (set EXCALIDRAW_DATA_DIR to keep it)'
-  });
-}
-
 async function main(): Promise<void> {
   const config = resolveGatewayConfig(process.env);
-  if (config.role === 'canvas') return runCanvas(config);
+  if (config.role === 'canvas') {
+    // Same entry as the canvas image (Dockerfile target `canvas`).
+    await import('./canvas-main.js');
+    return;
+  }
   const authConfig = resolveAuthConfig(config.host, process.env, { resourcePaths: [MCP_HTTP_PATH] });
   if (authConfig.mode === 'oauth') {
     for (const warning of authConfig.warnings) logger.warn(warning);
