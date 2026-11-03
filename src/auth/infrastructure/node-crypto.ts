@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Clock, Hasher, RandomSource, TicketSigner } from '../application/ports.js';
 
 export const systemClock: Clock = { nowMs: () => Date.now() };
@@ -23,12 +23,47 @@ export const sha256Hasher: Hasher = {
 /**
  * HMAC-SHA256 signed, expiring JSON values. Each use has its own purpose
  * string, so a value signed for one purpose never verifies as another.
+ * Sealed values are AES-256-GCM encrypted (purpose as associated data) with
+ * a separate key derived from the same secret, so every gateway sharing the
+ * secret can open them.
  */
 export class HmacTicketSigner implements TicketSigner {
   private readonly key: Buffer;
+  private readonly sealKey: Buffer;
 
   constructor(secret: Buffer, private readonly clock: Clock = systemClock) {
     this.key = createHmac('sha256', secret).update('pizarra/signer/v1').digest();
+    this.sealKey = createHmac('sha256', secret).update('pizarra/sealer/v1').digest();
+  }
+
+  seal(purpose: string, payload: Record<string, unknown>, ttlSeconds: number): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.sealKey, iv);
+    cipher.setAAD(Buffer.from(purpose, 'utf8'));
+    const body = Buffer.from(JSON.stringify({ ...payload, exp: this.now() + ttlSeconds }), 'utf8');
+    const data = Buffer.concat([cipher.update(body), cipher.final()]);
+    return [iv, data, cipher.getAuthTag()].map(part => part.toString('base64url')).join('.');
+  }
+
+  open<T extends Record<string, unknown>>(purpose: string, value: string | undefined): (T & { exp: number }) | null {
+    if (!value) return null;
+    const parts = value.split('.');
+    if (parts.length !== 3) return null;
+    const [iv, data, tag] = parts.map(part => Buffer.from(part!, 'base64url'));
+    if (iv!.length !== 12 || tag!.length !== 16) return null;
+    let parsed: unknown;
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', this.sealKey, iv!);
+      decipher.setAAD(Buffer.from(purpose, 'utf8'));
+      decipher.setAuthTag(tag!);
+      parsed = JSON.parse(Buffer.concat([decipher.update(data!), decipher.final()]).toString('utf8'));
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+    const exp = (parsed as { exp?: unknown }).exp;
+    if (typeof exp !== 'number' || exp <= this.now()) return null;
+    return parsed as T & { exp: number };
   }
 
   private mac(purpose: string, data: string): string {

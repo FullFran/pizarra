@@ -1,5 +1,5 @@
 import type { RegisteredClient } from '../domain/client.js';
-import type { RefreshTokenRecord, TokenRecord } from '../domain/token.js';
+import type { CodeRecord, DeviceLoginRecord, RefreshTokenRecord, TokenRecord } from '../domain/token.js';
 
 export type { Logger } from '../../shared/logger.js';
 
@@ -28,6 +28,9 @@ export interface Hasher {
 export interface TicketSigner {
   sign(purpose: string, payload: Record<string, unknown>, ttlSeconds: number): string;
   verify<T extends Record<string, unknown>>(purpose: string, value: string | undefined): (T & { exp: number }) | null;
+  /** Like `sign`, but encrypted too: whoever holds the value cannot read the payload. */
+  seal(purpose: string, payload: Record<string, unknown>, ttlSeconds: number): string;
+  open<T extends Record<string, unknown>>(purpose: string, value: string | undefined): (T & { exp: number }) | null;
 }
 
 /** Source of the raw signing secret (explicit, or generated on first start). */
@@ -35,7 +38,11 @@ export interface SecretProvider {
   secret(): Buffer;
 }
 
-/** Durable store of registered clients and hashed tokens. */
+/**
+ * Durable store of registered clients, hashed tokens and every other piece of
+ * auth state gateways must share (two copies run at once during a deploy).
+ * Each change is atomic across processes; single-use operations decide inside it.
+ */
 export interface TokenStore {
   clientCount(): number;
   getClient(clientId: string): RegisteredClient | undefined;
@@ -50,7 +57,19 @@ export interface TokenStore {
   /** A live access token (not expired, family active), or undefined. */
   getAccessToken(hash: string): TokenRecord | undefined;
   getRefreshToken(hash: string): RefreshTokenRecord | undefined;
-  markRefreshTokenUsed(hash: string): void;
+  /** Marks a refresh token used; false when it was already used (or is unknown), so only one exchange wins. */
+  markRefreshTokenUsed(hash: string): boolean;
+  putCode(hash: string, record: CodeRecord): void;
+  /** Burns the code for this client and returns it as it was before (undefined if unknown or another client's). */
+  useCode(hash: string, clientId: string): CodeRecord | undefined;
+  /** Remembers the family a code issued, so a replay can revoke it. */
+  setCodeFamily(hash: string, familyId: string): void;
+  /** True the first time `key` is claimed, false afterwards (until `expiresAt`, seconds). */
+  claimOnce(key: string, expiresAt: number): boolean;
+  deviceLoginCount(): number;
+  getDeviceLogin(nonce: string): DeviceLoginRecord | undefined;
+  putDeviceLogin(nonce: string, record: DeviceLoginRecord): void;
+  deleteDeviceLogin(nonce: string): void;
 }
 
 export class MetadataFetchError extends Error {

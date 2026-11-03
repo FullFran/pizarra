@@ -44,6 +44,9 @@ export function memoryStore(clock) {
   const access = new Map();
   const refresh = new Map();
   const families = new Map();
+  const codes = new Map();
+  const usedOnce = new Map();
+  const deviceLogins = new Map();
   let n = 0;
   const now = () => Math.floor(clock.nowMs() / 1000);
   const store = {
@@ -61,7 +64,18 @@ export function memoryStore(clock) {
     putTokens: (a, r) => { access.set(a.hash, a.record); refresh.set(r.hash, r.record); },
     getAccessToken: hash => { const r = access.get(hash); return r && r.expiresAt > now() && store.isFamilyActive(r.familyId) ? r : undefined; },
     getRefreshToken: hash => { const r = refresh.get(hash); return r && r.expiresAt > now() ? r : undefined; },
-    markRefreshTokenUsed: hash => { const r = refresh.get(hash); if (r) r.usedAt = now(); }
+    markRefreshTokenUsed: hash => { const r = refresh.get(hash); if (!r || r.usedAt !== undefined) return false; r.usedAt = now(); return true; },
+    putCode: (hash, record) => { codes.set(hash, { ...record }); },
+    useCode: (hash, clientId) => {
+      const r = codes.get(hash); if (!r || r.clientId !== clientId) return undefined;
+      const before = { ...r }; r.used = true; return before;
+    },
+    setCodeFamily: (hash, familyId) => { const r = codes.get(hash); if (r) r.familyId = familyId; },
+    claimOnce: (key, expiresAt) => { if (usedOnce.has(key)) return false; usedOnce.set(key, expiresAt); return true; },
+    deviceLoginCount: () => [...deviceLogins.values()].filter(r => r.expiresAt > clock.nowMs()).length,
+    getDeviceLogin: nonce => { const r = deviceLogins.get(nonce); return r && r.expiresAt > clock.nowMs() ? { ...r } : undefined; },
+    putDeviceLogin: (nonce, record) => { deviceLogins.set(nonce, { ...record }); },
+    deleteDeviceLogin: nonce => { deviceLogins.delete(nonce); }
   };
   return store;
 }

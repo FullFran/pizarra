@@ -1,7 +1,7 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { RegisteredClient } from '../domain/client.js';
-import type { RefreshTokenRecord, TokenRecord } from '../domain/token.js';
+import type { CodeRecord, DeviceLoginRecord, RefreshTokenRecord, TokenRecord } from '../domain/token.js';
 import type { Clock, RandomSource, TokenStore } from '../application/ports.js';
 import { cryptoRandom, systemClock } from './node-crypto.js';
 
@@ -16,29 +16,80 @@ interface StoreData {
   accessTokens: Record<string, TokenRecord>;
   refreshTokens: Record<string, RefreshTokenRecord>;
   families: Record<string, FamilyRecord>;
+  /** Authorization codes by hash. */
+  codes: Record<string, CodeRecord>;
+  /** Single-use keys (consent tickets) and when they may be forgotten, seconds. */
+  usedOnce: Record<string, number>;
+  /** GitHub device logins by the nonce in the browser's binding cookie. */
+  deviceLogins: Record<string, DeviceLoginRecord>;
 }
 
 function emptyData(): StoreData {
-  return { version: 1, clients: {}, accessTokens: {}, refreshTokens: {}, families: {} };
+  return { version: 1, clients: {}, accessTokens: {}, refreshTokens: {}, families: {}, codes: {}, usedOnce: {}, deviceLogins: {} };
+}
+
+/** A lock older than this was left by a process that died while holding it (holders keep it for milliseconds). */
+const STALE_LOCK_MS = 10_000;
+/** Waiting longer than this for the lock is an error. */
+const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_RETRY_MS = 5;
+/** Used codes are kept a little longer so a replay is still recognised. */
+const USED_CODE_GRACE_SECONDS = 600;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function own<T>(map: Record<string, T>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
 }
 
 /**
- * Durable token store: one JSON file, written atomically with mode 0600.
- * Keys of the token maps are SHA-256 hashes; raw tokens and client secrets
- * are never written. The data is tiny (a few users and clients), so the
- * whole file is rewritten on every change. Same format as the fork's
- * `auth-store.json`, so an existing data volume keeps working.
+ * Durable auth state: one JSON file, written atomically with mode 0600. Keys
+ * of the token and code maps are SHA-256 hashes; raw tokens, codes and
+ * client secrets are never written. The data is tiny (a few users and
+ * clients), so the whole file is rewritten on every change. Same format as
+ * the fork's `auth-store.json` (version 1, new maps optional), so an existing
+ * data volume keeps working.
+ *
+ * Several gateways may share the file (two containers during a blue-green
+ * deploy). Reads re-load the file when it changed on disk. Every change is
+ * a transaction: take a lock directory next to the file (mkdir is atomic
+ * across processes and containers on one host), re-load, change, write,
+ * release. Single-use operations (codes, refresh tokens, tickets) decide
+ * inside that transaction, so only one gateway can win them.
  */
 export class JsonFileTokenStore implements TokenStore {
-  private data: StoreData;
+  private data: StoreData = emptyData();
+  /** Identity of the file version in `data` (inode, size, mtime); a rename always changes the inode. */
+  private stamp = '';
+  private readonly lockPath: string;
 
   constructor(private readonly path: string, private readonly clock: Clock = systemClock, private readonly random: RandomSource = cryptoRandom) {
-    this.data = this.load();
-    this.prune();
+    this.lockPath = `${path}.lock`;
+    this.refresh();
   }
 
   private now(): number {
     return Math.floor(this.clock.nowMs() / 1000);
+  }
+
+  private fileStamp(): string {
+    try {
+      const stat = statSync(this.path);
+      return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'none';
+      throw error;
+    }
+  }
+
+  /** Re-loads the file if another process (or this one) replaced it since the last load. */
+  private refresh(): void {
+    const stamp = this.fileStamp();
+    if (stamp === this.stamp) return;
+    this.data = this.load();
+    this.stamp = stamp;
   }
 
   private load(): StoreData {
@@ -48,8 +99,49 @@ export class JsonFileTokenStore implements TokenStore {
     return { ...emptyData(), ...parsed, version: 1 };
   }
 
-  private save(): void {
+  private lock(): void {
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        mkdirSync(this.lockPath, { mode: 0o700 });
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      try {
+        if (Date.now() - statSync(this.lockPath).mtimeMs > STALE_LOCK_MS) {
+          rmSync(this.lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for the auth store lock ${this.lockPath}`);
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+
+  private unlock(): void {
+    rmSync(this.lockPath, { recursive: true, force: true });
+  }
+
+  /** Runs `change` on the current file contents under the lock, then writes the result. */
+  private transact<T>(change: (data: StoreData) => T): T {
+    this.lock();
+    try {
+      this.data = this.load();
+      this.prune();
+      const result = change(this.data);
+      this.save();
+      return result;
+    } finally {
+      this.unlock();
+    }
+  }
+
+  private save(): void {
     const temporary = `${this.path}.${process.pid}.${this.random.token(6)}.tmp`;
     const descriptor = openSync(temporary, 'wx', 0o600);
     try {
@@ -65,74 +157,139 @@ export class JsonFileTokenStore implements TokenStore {
       throw error;
     }
     chmodSync(this.path, 0o600);
+    this.stamp = this.fileStamp();
   }
 
   private prune(): void {
     const now = this.now();
-    for (const [key, record] of Object.entries(this.data.accessTokens)) if (record.expiresAt <= now) delete this.data.accessTokens[key];
-    for (const [key, record] of Object.entries(this.data.refreshTokens)) if (record.expiresAt <= now) delete this.data.refreshTokens[key];
-    for (const [key, record] of Object.entries(this.data.families)) if (record.expiresAt <= now) delete this.data.families[key];
+    const nowMs = this.clock.nowMs();
+    const data = this.data;
+    for (const [key, record] of Object.entries(data.accessTokens)) if (record.expiresAt <= now) delete data.accessTokens[key];
+    for (const [key, record] of Object.entries(data.refreshTokens)) if (record.expiresAt <= now) delete data.refreshTokens[key];
+    for (const [key, record] of Object.entries(data.families)) if (record.expiresAt <= now) delete data.families[key];
+    for (const [key, record] of Object.entries(data.codes)) if (record.expiresAt + USED_CODE_GRACE_SECONDS <= now) delete data.codes[key];
+    for (const [key, expiresAt] of Object.entries(data.usedOnce)) if (expiresAt <= now) delete data.usedOnce[key];
+    for (const [key, record] of Object.entries(data.deviceLogins)) if (record.expiresAt <= nowMs) delete data.deviceLogins[key];
+  }
+
+  private read(): StoreData {
+    this.refresh();
+    return this.data;
   }
 
   clientCount(): number {
-    return Object.keys(this.data.clients).length;
+    return Object.keys(this.read().clients).length;
   }
 
   getClient(clientId: string): RegisteredClient | undefined {
-    return Object.prototype.hasOwnProperty.call(this.data.clients, clientId) ? this.data.clients[clientId] : undefined;
+    return own(this.read().clients, clientId);
   }
 
   addClient(client: RegisteredClient): void {
-    this.data.clients[client.clientId] = client;
-    this.save();
+    this.transact(data => { data.clients[client.clientId] = client; });
   }
 
   createFamily(expiresAt: number): string {
     const id = this.random.token(16);
-    this.data.families[id] = { expiresAt };
+    this.transact(data => { data.families[id] = { expiresAt }; });
     return id;
   }
 
   isFamilyActive(familyId: string): boolean {
-    const family = this.data.families[familyId];
+    const family = own(this.read().families, familyId);
     return Boolean(family && !family.revokedAt && family.expiresAt > this.now());
   }
 
   extendFamily(familyId: string, expiresAt: number): void {
-    const family = this.data.families[familyId];
-    if (family) family.expiresAt = Math.max(family.expiresAt, expiresAt);
+    this.transact(data => {
+      const family = own(data.families, familyId);
+      if (family) family.expiresAt = Math.max(family.expiresAt, expiresAt);
+    });
   }
 
   revokeFamily(familyId: string): void {
-    const family = this.data.families[familyId];
-    if (family) family.revokedAt = this.now();
-    for (const [key, record] of Object.entries(this.data.accessTokens)) if (record.familyId === familyId) delete this.data.accessTokens[key];
-    for (const record of Object.values(this.data.refreshTokens)) if (record.familyId === familyId) record.usedAt ??= this.now();
-    this.save();
+    this.transact(data => {
+      const now = this.now();
+      const family = own(data.families, familyId);
+      if (family) family.revokedAt = now;
+      for (const [key, record] of Object.entries(data.accessTokens)) if (record.familyId === familyId) delete data.accessTokens[key];
+      for (const record of Object.values(data.refreshTokens)) if (record.familyId === familyId) record.usedAt ??= now;
+    });
   }
 
   putTokens(access: { hash: string; record: TokenRecord }, refresh: { hash: string; record: RefreshTokenRecord }): void {
-    this.prune();
-    this.data.accessTokens[access.hash] = access.record;
-    this.data.refreshTokens[refresh.hash] = refresh.record;
-    this.save();
+    this.transact(data => {
+      data.accessTokens[access.hash] = access.record;
+      data.refreshTokens[refresh.hash] = refresh.record;
+    });
   }
 
   getAccessToken(hash: string): TokenRecord | undefined {
-    const record = this.data.accessTokens[hash];
+    const record = own(this.read().accessTokens, hash);
     if (!record) return undefined;
     if (record.expiresAt <= this.now() || !this.isFamilyActive(record.familyId)) return undefined;
     return record;
   }
 
   getRefreshToken(hash: string): RefreshTokenRecord | undefined {
-    const record = this.data.refreshTokens[hash];
+    const record = own(this.read().refreshTokens, hash);
     if (!record || record.expiresAt <= this.now()) return undefined;
     return record;
   }
 
-  markRefreshTokenUsed(hash: string): void {
-    const record = this.data.refreshTokens[hash];
-    if (record) record.usedAt = this.now();
+  markRefreshTokenUsed(hash: string): boolean {
+    return this.transact(data => {
+      const record = own(data.refreshTokens, hash);
+      if (!record || record.usedAt !== undefined) return false;
+      record.usedAt = this.now();
+      return true;
+    });
+  }
+
+  putCode(hash: string, record: CodeRecord): void {
+    this.transact(data => { data.codes[hash] = record; });
+  }
+
+  useCode(hash: string, clientId: string): CodeRecord | undefined {
+    return this.transact(data => {
+      const record = own(data.codes, hash);
+      if (!record || record.clientId !== clientId) return undefined;
+      const before = { ...record };
+      record.used = true;
+      return before;
+    });
+  }
+
+  setCodeFamily(hash: string, familyId: string): void {
+    this.transact(data => {
+      const record = own(data.codes, hash);
+      if (record) record.familyId = familyId;
+    });
+  }
+
+  claimOnce(key: string, expiresAt: number): boolean {
+    return this.transact(data => {
+      if (own(data.usedOnce, key) !== undefined) return false;
+      data.usedOnce[key] = expiresAt;
+      return true;
+    });
+  }
+
+  deviceLoginCount(): number {
+    const nowMs = this.clock.nowMs();
+    return Object.values(this.read().deviceLogins).filter(record => record.expiresAt > nowMs).length;
+  }
+
+  getDeviceLogin(nonce: string): DeviceLoginRecord | undefined {
+    const record = own(this.read().deviceLogins, nonce);
+    return record && record.expiresAt > this.clock.nowMs() ? { ...record } : undefined;
+  }
+
+  putDeviceLogin(nonce: string, record: DeviceLoginRecord): void {
+    this.transact(data => { data.deviceLogins[nonce] = record; });
+  }
+
+  deleteDeviceLogin(nonce: string): void {
+    this.transact(data => { delete data.deviceLogins[nonce]; });
   }
 }

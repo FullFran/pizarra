@@ -54,15 +54,15 @@ export function buildAuth(config: AuthOnConfig, deps: AuthDeps): AuthModule {
   const cookies = new CookieJar(config.secureCookies);
   const sessions = new SessionService(settings, signer, random);
   const clients = new ClientRegistry(store, new SafeClientMetadataFetcher(deps.cimdFetch), hasher, random, clock);
-  const codes = new AuthorizationCodes(hasher, random, clock);
+  const codes = new AuthorizationCodes(store, hasher, random);
   const github = new GitHubDeviceFlow(config.github);
   const router = createOAuthRouter({
     settings,
     cookies,
     sessions,
     clients,
-    deviceSignIn: new DeviceSignIn(settings, github, signer, random, clock, deps.logger),
-    authorization: new AuthorizationService(settings, clients, sessions, codes, signer, random, clock),
+    deviceSignIn: new DeviceSignIn(settings, github, signer, random, clock, deps.logger, store),
+    authorization: new AuthorizationService(settings, clients, sessions, codes, signer, random, clock, store),
     tokens: new TokenService(settings, store, clients, codes, hasher, random, clock, deps.logger),
     ...(config.github.appName ? { appName: config.github.appName } : {}),
     resourceName: deps.resourceName ?? 'pizarra'

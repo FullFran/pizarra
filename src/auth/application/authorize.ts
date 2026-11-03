@@ -8,7 +8,7 @@ import type { AuthorizationCodes } from './authorization-codes.js';
 import type { ClientRegistry } from './clients.js';
 import type { SessionService } from './sessions.js';
 import type { AuthSettings } from './settings.js';
-import type { Clock, RandomSource, TicketSigner } from './ports.js';
+import type { Clock, RandomSource, TicketSigner, TokenStore } from './ports.js';
 import { nowSeconds } from './ports.js';
 
 const CONSENT_PURPOSE = 'consent';
@@ -71,7 +71,6 @@ function errorPage(status: number, title: string, message: string): ErrorPage {
 /** The authorization endpoint: request validation, consent, code issuance. */
 export class AuthorizationService {
   // consent ticket id -> expiry (epoch seconds); tickets are single use
-  private readonly usedTickets = new Map<string, number>();
 
   constructor(
     private readonly settings: AuthSettings,
@@ -80,7 +79,8 @@ export class AuthorizationService {
     private readonly codes: AuthorizationCodes,
     private readonly signer: TicketSigner,
     private readonly random: RandomSource,
-    private readonly clock: Clock
+    private readonly clock: Clock,
+    private readonly store: TokenStore
   ) {}
 
   redirect(redirectUri: string, params: Record<string, string | undefined>): ClientRedirect {
@@ -150,12 +150,9 @@ export class AuthorizationService {
       return errorPage(400, 'Request expired', 'This approval request expired or belongs to another session. Start again from the application.');
     }
     // Burnt before any await.
-    const now = nowSeconds(this.clock);
-    for (const [id, expiresAt] of this.usedTickets) if (expiresAt <= now) this.usedTickets.delete(id);
-    if (this.usedTickets.has(ticket.tid)) {
+    if (!this.store.claimOnce(`consent:${ticket.tid}`, ticket.exp)) {
       return errorPage(400, 'Request already used', 'This approval request was already answered. Start again from the application.');
     }
-    this.usedTickets.set(ticket.tid, ticket.exp);
     // The client could have changed its metadata document since the consent
     // page was shown; re-check the redirect against it.
     let client: ResolvedClient;

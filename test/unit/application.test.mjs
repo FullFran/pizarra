@@ -9,6 +9,7 @@ import { SessionService } from '../../dist/auth/application/sessions.js';
 import { TokenService } from '../../dist/auth/application/tokens.js';
 import { AccessTokenVerifier } from '../../dist/auth/application/access-tokens.js';
 import { AccessGate } from '../../dist/gateway/application/access-gate.js';
+import { HmacTicketSigner } from '../../dist/auth/infrastructure/node-crypto.js';
 import { fakeClock, fakeRandom, hasher, memoryStore, scriptedGitHub, scriptedMetadata, settings, signer, silentLogger } from './fakes.mjs';
 
 const CIMD_ID = 'https://app.example/client.json';
@@ -22,8 +23,8 @@ function world() {
   const metadata = scriptedMetadata({ [CIMD_ID]: { client_id: CIMD_ID, client_name: 'Agent', redirect_uris: ['http://127.0.0.1/cb'] } });
   const clients = new ClientRegistry(store, metadata, hasher, random, clock);
   const sessions = new SessionService(s, sign, random);
-  const codes = new AuthorizationCodes(hasher, random, clock);
-  const authorization = new AuthorizationService(s, clients, sessions, codes, sign, random, clock);
+  const codes = new AuthorizationCodes(store, hasher, random);
+  const authorization = new AuthorizationService(s, clients, sessions, codes, sign, random, clock, store);
   const tokens = new TokenService(s, store, clients, codes, hasher, random, clock, silentLogger);
   const verifier = new AccessTokenVerifier(s, store, hasher);
   return { clock, random, s, sign, store, metadata, clients, sessions, codes, authorization, tokens, verifier };
@@ -152,7 +153,7 @@ test('device sign-in: waits the interval, honours slow_down, refuses accounts ou
   const clock = fakeClock();
   const github = scriptedGitHub();
   const sign = signer(clock);
-  const device = new DeviceSignIn(settings(), github, sign, fakeRandom(), clock, silentLogger);
+  const device = new DeviceSignIn(settings(), github, sign, fakeRandom(), clock, silentLogger, memoryStore(clock));
   const started = await device.start('/\t/evil.example');
   assert.equal(started.kind, 'started');
   assert.equal((await device.poll(started.binding)).kind, 'pending');
@@ -181,7 +182,7 @@ test('device sign-in: waits the interval, honours slow_down, refuses accounts ou
 
 test('device sign-in: at most 20 pending logins', async () => {
   const clock = fakeClock();
-  const device = new DeviceSignIn(settings(), scriptedGitHub(), signer(clock), fakeRandom(), clock, silentLogger);
+  const device = new DeviceSignIn(settings(), scriptedGitHub(), signer(clock), fakeRandom(), clock, silentLogger, memoryStore(clock));
   for (let i = 0; i < 20; i += 1) assert.equal((await device.start('/')).kind, 'started');
   assert.equal((await device.start('/')).kind, 'too_many');
   clock.advance(901_000);
@@ -238,4 +239,50 @@ test('access gate: WebSocket needs a bearer, or the session with our Origin', ()
   assert.equal(gate.decideUpgrade({ cookie: 'c' }).status, 403);
   assert.equal(gate.decideUpgrade({ cookie: 'c', origin: 'https://evil.example' }).status, 403);
   assert.equal(gate.decideUpgrade({}).status, 401);
+});
+
+test('device sign-in: a login started on one gateway completes on the other, and polls GitHub once per interval', async () => {
+  const clock = fakeClock();
+  const github = scriptedGitHub();
+  github.state.next = [{ kind: 'login', login: 'FullFran' }];
+  const store = memoryStore(clock);
+  const sign = signer(clock);
+  const a = new DeviceSignIn(settings(), github, sign, fakeRandom(), clock, silentLogger, store);
+  const b = new DeviceSignIn(settings(), github, sign, fakeRandom(), clock, silentLogger, store);
+  const started = await a.start('/board');
+  assert.equal(b.view(started.binding).kind, 'waiting', 'the other gateway shows the code');
+  clock.advance(5000);
+  const [first, second] = await Promise.all([b.poll(started.binding), a.poll(started.binding)]);
+  assert.equal(github.state.polls, 1, 'two gateways polling at once call GitHub once');
+  assert.equal([first, second].filter(r => r.kind === 'complete').length, 1, 'exactly one gateway completes the login');
+  assert.equal([first, second].find(r => r.kind === 'complete').login, 'FullFran');
+  assert.equal((await a.poll(started.binding)).kind, 'none', 'the login is gone after completing');
+});
+
+test('device sign-in: the binding cookie is sealed and the device code is never stored', async () => {
+  const clock = fakeClock();
+  const store = memoryStore(clock);
+  const puts = [];
+  const spy = { ...store, putDeviceLogin: (nonce, record) => { puts.push(record); store.putDeviceLogin(nonce, record); } };
+  const device = new DeviceSignIn(settings(), scriptedGitHub(), signer(clock), fakeRandom(), clock, silentLogger, spy);
+  const started = await device.start('/');
+  assert.ok(!started.binding.includes('dev1') && !Buffer.from(started.binding.split('.')[1], 'base64url').toString().includes('dev1'),
+    'the device code cannot be read from the cookie');
+  assert.ok(puts.length > 0 && puts.every(record => !JSON.stringify(record).includes('dev1')), 'no stored record holds the device code');
+});
+
+test('sealed tickets: readable only with the key, bound to their purpose, tamper-proof and expiring', () => {
+  const clock = fakeClock();
+  const sign = signer(clock);
+  const sealed = sign.seal('device-login', { n: 'nonce', d: 'secret-device-code' }, 60);
+  assert.ok(!sealed.includes('secret') && !sealed.split('.').some(part => Buffer.from(part, 'base64url').toString().includes('secret')));
+  assert.equal(sign.open('device-login', sealed)?.d, 'secret-device-code');
+  assert.equal(sign.open('other-purpose', sealed), null);
+  assert.equal(sign.verify('device-login', sealed), null, 'a sealed value is not a signed one');
+  const [iv, data, tag] = sealed.split('.');
+  const flipped = Buffer.from(data, 'base64url'); flipped[0] ^= 1;
+  assert.equal(sign.open('device-login', [iv, flipped.toString('base64url'), tag].join('.')), null);
+  assert.equal(new HmacTicketSigner(Buffer.from('y'.repeat(40)), clock).open('device-login', sealed), null, 'another secret cannot open it');
+  clock.advance(61_000);
+  assert.equal(sign.open('device-login', sealed), null);
 });
