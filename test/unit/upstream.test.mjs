@@ -2,6 +2,7 @@
 // agree with it; the stale-lock adapter follows upstream's lock format.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { resolveGatewayConfig } from '../../dist/config.js';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -61,4 +62,23 @@ test('stale canvas lock: a dead owner is cleared, a live one is kept, anything o
   const empty = mkdtempSync(join(tmpdir(), 'pizarra-lock-'));
   assert.equal(clearStaleCanvasLock(empty), 'none');
   rmSync(empty, { recursive: true });
+});
+
+
+test('gateway config: CANVAS_URL and PIZARRA_ROLE', () => {
+  const plain = resolveGatewayConfig({});
+  assert.equal(plain.role, 'gateway');
+  assert.equal(plain.canvasUrl, undefined, 'without CANVAS_URL the gateway runs its own canvas');
+  const remote = resolveGatewayConfig({ CANVAS_URL: 'http://pizarra-canvas:3100' });
+  assert.equal(remote.canvasUrl?.hostname, 'pizarra-canvas');
+  assert.equal(remote.canvasUrl?.port, '3100');
+  for (const bad of ['https://pizarra-canvas:3100', 'http://pizarra-canvas', 'http://pizarra-canvas:3100/x', 'http://u:p@pizarra-canvas:3100', 'not a url']) {
+    assert.throws(() => resolveGatewayConfig({ CANVAS_URL: bad }), /CANVAS_URL/, bad);
+  }
+  const canvas = resolveGatewayConfig({ PIZARRA_ROLE: 'canvas', CANVAS_INTERNAL_PORT: '3100' });
+  assert.equal(canvas.role, 'canvas');
+  assert.equal(canvas.canvasBindHost, '0.0.0.0', 'the canvas role serves other containers by default');
+  assert.throws(() => resolveGatewayConfig({ PIZARRA_ROLE: 'canvas' }), /CANVAS_INTERNAL_PORT/);
+  assert.throws(() => resolveGatewayConfig({ PIZARRA_ROLE: 'canvas', CANVAS_INTERNAL_PORT: '3100', CANVAS_URL: 'http://x:1' }), /CANVAS_URL/);
+  assert.throws(() => resolveGatewayConfig({ PIZARRA_ROLE: 'both' }), /PIZARRA_ROLE/);
 });

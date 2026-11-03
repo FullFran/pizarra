@@ -197,6 +197,81 @@ async function checkDurability() {
   ok('a lock left by a hard-killed canvas is cleared and the canvas comes back with its elements');
 }
 
+async function startProcess(env, healthUrl, label) {
+  const full = { ...process.env, LOG_LEVEL: 'warn', XDG_STATE_HOME: scratch, ...env };
+  for (const name of ['EXPRESS_SERVER_URL', 'TRUST_PROXY']) delete full[name];
+  for (const name of ['AUTH_MODE', 'PUBLIC_BASE_URL', 'EXCALIDRAW_DATA_DIR', 'CANVAS_DATA_DIR', 'EXCALIDRAW_EXPORT_DIR', 'CANVAS_URL', 'PIZARRA_ROLE', 'CANVAS_BIND_HOST'])
+    if (!(name in env)) delete full[name];
+  const child = spawn(process.execPath, [mainPath], { cwd: scratch, env: full, stdio: ['ignore', 'pipe', 'pipe'] });
+  spawned.add(child);
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  if (healthUrl) {
+    await waitFor(async () => {
+      if (child.exitCode !== null) throw new Error(`${label} exited: ${output}`);
+      return (await json(healthUrl)).status === 200;
+    }, 15000, `${label} healthy (${output})`);
+  }
+  return { child, output: () => output };
+}
+
+async function startCanvasRole(canvasPort, dataDir) {
+  const canvas = await startProcess(
+    { PIZARRA_ROLE: 'canvas', CANVAS_BIND_HOST: '127.0.0.1', CANVAS_INTERNAL_PORT: String(canvasPort), EXCALIDRAW_DATA_DIR: dataDir },
+    `http://127.0.0.1:${canvasPort}/health`, 'canvas role');
+  const health = await json(`http://127.0.0.1:${canvasPort}/health`);
+  return { ...canvas, pid: health.body?.pid };
+}
+
+async function startRemoteGateway(canvasPort, extra = {}) {
+  const port = await freePort();
+  const gateway = await startProcess({ PORT: String(port), HOST: '127.0.0.1', CANVAS_URL: `http://127.0.0.1:${canvasPort}`, ...extra },
+    `http://127.0.0.1:${port}/health`, 'gateway with CANVAS_URL');
+  return { ...gateway, base: `http://127.0.0.1:${port}` };
+}
+
+async function checkSplitCanvas() {
+  const canvasPort = await freePort();
+  const dataDir = join(scratch, 'split');
+  let canvas = await startCanvasRole(canvasPort, dataDir);
+  assert(canvas.pid > 0 && existsSync(join(dataDir, 'canvas')), 'the canvas role runs the upstream on <data>/canvas');
+  const a = await startRemoteGateway(canvasPort);
+  const b = await startRemoteGateway(canvasPort);
+  for (const g of [a, b]) {
+    const children = readFileSync(`/proc/${g.child.pid}/task/${g.child.pid}/children`, 'utf8').trim();
+    assert(children === '', `a gateway with CANVAS_URL spawns no canvas of its own (children: ${children})`);
+  }
+  await createElements(a, 'split');
+  await expectElements(b, 'split', 'seen through the other gateway');
+  ok('two gateways with CANVAS_URL share one canvas run by PIZARRA_ROLE=canvas, and spawn none of their own');
+
+  canvas.child.kill('SIGTERM');
+  await waitFor(() => canvas.child.exitCode !== null, 8000, 'canvas role exits on SIGTERM');
+  assert(!processAlive(canvas.pid), 'the upstream stops with the canvas role');
+  // Without auth /health is the canvas's own, proxied: 502 while it is down (503 with auth on, as in production).
+  await waitFor(async () => (await json(`${a.base}/health`)).status >= 500 && (await json(`${b.base}/health`)).status >= 500, 8000,
+    'gateways report the canvas down');
+  canvas = await startCanvasRole(canvasPort, dataDir);
+  await waitFor(async () => (await json(`${a.base}/health`)).status === 200 && (await json(`${b.base}/health`)).status === 200, 15000,
+    'gateways see the canvas back');
+  await expectElements(a, 'split', 'after the canvas restarted');
+  ok('gateways answer 5xx while the canvas is down and recover when it is back, with its elements');
+
+  a.child.kill('SIGTERM');
+  await waitFor(() => a.child.exitCode !== null, 8000, 'gateway exits on SIGTERM');
+  assert((await json(`http://127.0.0.1:${canvasPort}/health`)).status === 200, 'the canvas outlives a gateway');
+  await expectElements(b, 'split', 'after one gateway stopped');
+  ok('stopping one gateway leaves the shared canvas and the other gateway serving');
+
+  const bad = await startProcess({ PIZARRA_ROLE: 'canvas', CANVAS_URL: `http://127.0.0.1:${canvasPort}`, CANVAS_INTERNAL_PORT: String(await freePort()) }, null, 'bad');
+  await waitFor(() => bad.child.exitCode !== null, 5000, 'contradictory role exits');
+  assert(bad.child.exitCode !== 0 && /CANVAS_URL/.test(bad.output()), `PIZARRA_ROLE=canvas with CANVAS_URL is refused: ${bad.output()}`);
+  ok('PIZARRA_ROLE=canvas together with CANVAS_URL is a startup error');
+  for (const p of [b, canvas]) p.child.kill('SIGTERM');
+  await waitFor(() => b.child.exitCode !== null && canvas.child.exitCode !== null, 8000, 'split processes exit');
+}
+
 async function checkOrphanProtection() {
   const gateway = await startGateway();
   gateway.child.kill('SIGKILL');
@@ -209,6 +284,7 @@ try {
   await checkEnvironmentAndRestart();
   await checkOrphanProtection();
   await checkDurability();
+  await checkSplitCanvas();
   console.log(`Proxy supervision check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`Proxy supervision check failed after ${passed} groups: ${error.stack || error.message}`);
