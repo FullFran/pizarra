@@ -1,3 +1,5 @@
+import type { DeviceOutcome } from './device-login.js';
+
 export interface TokenRecord {
   clientId: string;
   login: string;
@@ -14,7 +16,7 @@ export interface RefreshTokenRecord extends TokenRecord {
   usedAt?: number;
 }
 
-/** An authorization code (kept in memory, single use). */
+/** An authorization code (in the shared store, by hash; single use). */
 export interface CodeRecord {
   clientId: string;
   redirectUri: string;
@@ -25,4 +27,19 @@ export interface CodeRecord {
   expiresAt: number;
   used: boolean;
   familyId?: string;
+}
+
+/**
+ * A GitHub device login waiting for its browser, in the shared store (epoch
+ * milliseconds). GitHub's secret device code is not here: it travels sealed
+ * in the browser's binding cookie, so it is never written to disk.
+ */
+export interface DeviceLoginRecord {
+  userCode: string;
+  verificationUri: string;
+  expiresAt: number;
+  intervalMs: number;
+  nextPollAt: number;
+  returnTo: string;
+  outcome?: DeviceOutcome;
 }

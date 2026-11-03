@@ -62,16 +62,15 @@ export class TokenService {
     }
 
     if (request.grantType === 'authorization_code') {
-      const record = this.codes.find(request.code);
-      if (!record || record.clientId !== client.clientId) return fail(400, 'invalid_grant', 'unknown authorization code');
+      // Single use: burnt on first presentation, whatever the outcome, atomically across gateways.
+      const record = this.codes.redeem(request.code, client.clientId);
+      if (!record) return fail(400, 'invalid_grant', 'unknown authorization code');
       if (record.used) {
         // RFC 6749 §4.1.2: a replayed code revokes what it issued.
         if (record.familyId) this.store.revokeFamily(record.familyId);
         this.logger.warn('Authorization code replayed; revoked its tokens', { clientId: client.clientId });
         return fail(400, 'invalid_grant', 'authorization code already used');
       }
-      // Single use: burnt on first presentation, whatever the outcome.
-      record.used = true;
       if (record.expiresAt <= nowSeconds(this.clock)) return fail(400, 'invalid_grant', 'authorization code expired');
       if (request.redirectUri !== record.redirectUri) return fail(400, 'invalid_grant', 'redirect_uri does not match the authorization request');
       if (request.resource !== undefined && chooseResource(request.resource, [record.resource]).ok === false) {
@@ -82,7 +81,7 @@ export class TokenService {
         return fail(400, 'invalid_grant', 'PKCE verification failed');
       }
       const familyId = this.store.createFamily(nowSeconds(this.clock) + this.settings.refreshTokenTtlSeconds);
-      record.familyId = familyId;
+      this.codes.issued(request.code!, familyId);
       return { ok: true, body: this.issue(client.clientId, record.login, record.scope, record.resource, familyId) };
     }
 
@@ -99,7 +98,12 @@ export class TokenService {
       if (!this.store.isFamilyActive(record.familyId)) return fail(400, 'invalid_grant', 'refresh token revoked');
       if (!this.settings.allowedLogins.has(record.login)) return fail(400, 'invalid_grant', 'account no longer allowed');
       if (!withinGrant(request.scope, record.scope)) return fail(400, 'invalid_scope', 'scope exceeds the original grant');
-      this.store.markRefreshTokenUsed(hash);
+      if (!this.store.markRefreshTokenUsed(hash)) {
+        // Another exchange (maybe on the other gateway) won the race: same as reuse.
+        this.store.revokeFamily(record.familyId);
+        this.logger.warn('Refresh token reused; revoked its token family', { clientId: client.clientId });
+        return fail(400, 'invalid_grant', 'refresh token already used');
+      }
       return { ok: true, body: this.issue(client.clientId, record.login, record.scope, record.resource, record.familyId) };
     }
     return fail(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
