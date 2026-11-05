@@ -33,18 +33,20 @@ On a loopback bind, GitHub or auth variables without `AUTH_MODE=oauth` are ignor
 | `PUBLIC_BASE_URL` | yes | Public origin, e.g. `https://board.example.com`. Must be `https` (plain `http` only for `127.0.0.1`/`localhost`) and must not have a path. It is the OAuth issuer; the protected resource is `${PUBLIC_BASE_URL}/mcp`. |
 | `GITHUB_CLIENT_ID` | yes | Client ID of your GitHub OAuth app (public; not a secret). |
 | `ALLOWED_GITHUB_LOGINS` | yes | Comma-separated GitHub logins allowed to sign in, case-insensitive, e.g. `FullFran`. **There is no default**: if it is unset the server refuses to start, so nobody gets in by accident. |
-| `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`), with the fork's names and format. It also turns on durable canvas state, in `canvas/` below it (see `CANVAS_DATA_DIR`). |
-| `CANVAS_DATA_DIR` | no | Where the canvas keeps its durable state (upstream's `EXCALIDRAW_DATA_DIR`). Default `$EXCALIDRAW_DATA_DIR/canvas`. The fork kept `canvas-state-v1.json` and `blobs/` at the data directory's root: move them into `canvas/`, or set `CANVAS_DATA_DIR` to the root, to keep a fork-era drawing. |
-| `EXCALIDRAW_EXPORT_DIR` | no | The only directory upstream's MCP file tools may read and write. Default `$EXCALIDRAW_DATA_DIR/files` (upstream's own default is the working directory, i.e. the application). |
+| `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`), with the fork's names and format; the boards and their members in `boards.json` (`0600`). It also turns on durable canvas state: each board keeps its canvas in `boards/<id>/canvas/` and its MCP files in `boards/<id>/files/` (see [docs/multiuser.md](multiuser.md); a single-canvas `canvas/` and `files/` are moved to board `main` on the first start). |
+| `CANVAS_DATA_DIR` | no | Board `main`'s canvas directory (upstream's `EXCALIDRAW_DATA_DIR`) instead of `$EXCALIDRAW_DATA_DIR/boards/main/canvas`; nothing is migrated when it is set. The fork kept `canvas-state-v1.json` and `blobs/` at the data directory's root: set `CANVAS_DATA_DIR` to the root to keep a fork-era drawing. |
+| `EXCALIDRAW_EXPORT_DIR` | no | Board `main`'s export directory (the only one its MCP file tools may read and write) instead of `$EXCALIDRAW_DATA_DIR/boards/main/files`. Every other board uses `boards/<id>/files`. |
+| `BOARD_IDLE_SECONDS` | no | A board's canvas process stops after this long without requests or open WebSockets, and starts again on the next one. Default `600`. Board `main` never stops. |
+| `MAX_OPEN_BOARDS` | no | At most this many board canvases run at once, `main` included. Default `8`. Opening another stops the least recently used idle one, or answers `503`. |
 | `GITHUB_APP_NAME` | no | The name you gave the GitHub OAuth app. The sign-in page shows it, so you can check GitHub names the same app. |
 | `AUTH_SECRET` or `AUTH_SECRET_FILE` | no | Signing secret for session cookies, the sign-in binding cookie and consent forms, at least 32 characters. When neither is set, the server generates one (48 random bytes) in `$EXCALIDRAW_DATA_DIR/auth-secret` on first start and reuses it afterwards. An explicit value wins. Changing or deleting it signs everyone out. |
 | `TRUST_PROXY` | behind a proxy | Set it (e.g. `loopback`) when a reverse proxy you control terminates TLS, so rate limits see client IPs. |
 | `AUTH_ACCESS_TOKEN_TTL_SECONDS` | no | Access token lifetime. Default `3600` (1 h), 1–86400. |
 | `AUTH_REFRESH_TOKEN_TTL_SECONDS` | no | Refresh token lifetime. Default 30 days. |
 | `AUTH_SESSION_TTL_SECONDS` | no | Browser session lifetime. Default 7 days. |
-| `CANVAS_INTERNAL_PORT` | no | Loopback port of the upstream canvas inside the gateway's host or container. Default: a free port (`3100` in the image). |
-| `PIZARRA_ROLE` | no | `gateway` (default) or `canvas`. `canvas` runs only the upstream canvas (on `CANVAS_BIND_HOST:CANVAS_INTERNAL_PORT`, with `<data>/canvas`), for gateways in other containers; it has no auth of its own, so reach it only from a private network. |
-| `CANVAS_URL` | no | `http://host:port` of a canvas run with `PIZARRA_ROLE=canvas`. The gateway then spawns no canvas and its `/health` follows that canvas. Several gateways can share one canvas this way. |
+| `CANVAS_INTERNAL_PORT` | no | Loopback port of the canvas pool's front inside the gateway's host or container (each board's canvas gets a free loopback port behind it). Default: a free port (`3100` in the image). |
+| `PIZARRA_ROLE` | no | `gateway` (default) or `canvas`. `canvas` runs only the pool of board canvases (its front on `CANVAS_BIND_HOST:CANVAS_INTERNAL_PORT`, with `<data>/boards/<id>/canvas`), for gateways in other containers; it has no auth of its own, so reach it only from a private network. |
+| `CANVAS_URL` | no | `http://host:port` of a canvas pool run with `PIZARRA_ROLE=canvas`. The gateway then spawns no canvas and its `/health` follows that pool's board `main`. Several gateways can share one pool this way. |
 | `CANVAS_BIND_HOST` | no | Where the `canvas` role listens. Default `0.0.0.0`. |
 | `GITHUB_OAUTH_BASE_URL` / `GITHUB_API_BASE_URL` | no | Override `https://github.com` / `https://api.github.com` (GitHub Enterprise, or a fake GitHub in tests). |
 
@@ -94,7 +96,7 @@ If the code expires (GitHub's `expires_in`, at most 15 minutes), you cancel on G
 
 | Surface | Without credentials | Accepted credentials |
 |---|---|---|
-| `/mcp` | `401` with `WWW-Authenticate: Bearer resource_metadata="${PUBLIC_BASE_URL}/.well-known/oauth-protected-resource", scope="whiteboard"` | `Authorization: Bearer <access token>` for resource `${PUBLIC_BASE_URL}/mcp` with scope `whiteboard` |
+| `/mcp`, `/b/<id>/mcp` | `401` with `WWW-Authenticate: Bearer resource_metadata="${PUBLIC_BASE_URL}/.well-known/oauth-protected-resource", scope="whiteboard"` (for `/b/<id>/mcp`: `…/oauth-protected-resource/b/<id>/mcp`) | `Authorization: Bearer <access token>` for that board's resource with scope `whiteboard` (or a trusted issuer's ticket for the board, below) |
 | canvas page, static files | `302` to `/oauth/login` | session cookie |
 | `/api/*` | `401` | session cookie, or a bearer access token. Writes with the cookie must come from `PUBLIC_BASE_URL` (`Origin`, or `Referer` when there is no `Origin`), otherwise `403`. |
 | WebSocket | `401` | bearer access token, or the session cookie with `Origin` equal to `PUBLIC_BASE_URL` (any other Origin: `403`) |
@@ -119,7 +121,7 @@ Protocol details:
 
 - **PKCE** is mandatory and only `S256` is accepted; `plain` or a missing challenge is rejected with `invalid_request`.
 - **RFC 9207:** every authorization response, success or error, carries `iss=${PUBLIC_BASE_URL}`.
-- **RFC 8707:** `resource` is optional; when given it must be `${PUBLIC_BASE_URL}/mcp` (`invalid_target` otherwise). Every token is bound to that resource and checked on every request.
+- **RFC 8707:** every board is its own protected resource, `${PUBLIC_BASE_URL}/b/<id>/mcp`, and `${PUBLIC_BASE_URL}/mcp` is board `main`'s. `resource` is optional (it then means `/mcp`); when given it must be one of a GitHub board's resources (`invalid_target` otherwise), and the signed-in account must be able to open that board. Every token is bound to its resource and checked on every request: a token for one board never opens another. Its metadata is at `/.well-known/oauth-protected-resource/b/<id>/mcp`.
 - **Codes** live 60 s, are single use, and are burnt on the first presentation whatever the outcome. Presenting a used code again revokes the tokens it produced.
 - **Refresh tokens rotate.** Each one works once; reusing an old one revokes its whole family (every access and refresh token descending from the same authorization code).
 - **Clients** are either a Client ID Metadata Document URL (the 2025-11-25 / 2026-07-28 way; `client_id` is an `https` URL with a path whose JSON document lists `redirect_uris`) or a client registered through `/oauth/register`. Metadata documents are fetched only over `https`, only from public IP addresses (loopback, private, link-local, CGNAT, multicast and IPv4-mapped forms are refused, and the connection is pinned to the checked address), without redirects, within 5 s and 64 KiB, and cached for its `Cache-Control: max-age` between 1 minute and 24 hours. Only public clients (`token_endpoint_auth_method: "none"`) are accepted from a document.
@@ -189,7 +191,7 @@ Assumptions:
 
 Out of scope:
 
-- Users or roles beyond the allowlist: every allowed login has full access to the canvas.
+- Link invites (anyone holding a link could join): invites are by GitHub login only (docs/multiuser.md, decisions).
 - Revoking one client from a UI. To revoke everything, stop the server and delete `auth-store.json`; to sign every browser out, change `AUTH_SECRET` or delete the generated `auth-secret`; to drop a person, remove their login from `ALLOWED_GITHUB_LOGINS` and restart (their sessions and tokens stop working).
 - Token introspection and revocation endpoints (RFC 7662 / 7009), `private_key_jwt` clients, OpenID Connect.
 - Rate limiting shared across processes, and protection against volumetric denial of service (use the proxy). In particular, someone who can reach the server from 4 or more IPs can fill the 20 pending device logins and delay sign-ins for up to 15 minutes (restarting the server clears them; existing sessions and tokens keep working).

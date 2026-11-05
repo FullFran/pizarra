@@ -96,9 +96,13 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
     if (byPath !== path) router.get(byPath, document);
   }
   // Resources that come and go (one per board): `/.well-known/oauth-protected-resource/b/<id>/mcp`.
-  router.get(/^\/\.well-known\/oauth-protected-resource(\/[A-Za-z0-9/_-]+)$/, (req, res, next) => {
+  router.get(/^\/\.well-known\/oauth-protected-resource(\/[A-Za-z0-9/_-]+)$/, (req, res) => {
     const resource = `${issuer}${(req.params as Record<string, string>)[0]}`;
-    if (!deps.policy.describeResource(resource)) return next();
+    if (!deps.policy.describeResource(resource)) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(404).json({ error: 'not_found', error_description: 'no such protected resource' });
+      return;
+    }
     res.setHeader('Cache-Control', 'public, max-age=60');
     res.json({
       resource,

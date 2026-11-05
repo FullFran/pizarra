@@ -17,7 +17,13 @@ function connectionTokens(headers: IncomingHttpHeaders): Set<string> {
   return new Set(list.split(',').map(token => token.trim().toLowerCase()).filter(Boolean));
 }
 
-function requestHeaders(req: IncomingMessage, upstream: CanvasUpstream): OutgoingHttpHeaders {
+/** Where a request is forwarded to. */
+export interface ProxyTarget {
+  readonly host: string;
+  readonly port: number;
+}
+
+function requestHeaders(req: IncomingMessage, upstream: ProxyTarget): OutgoingHttpHeaders {
   const listed = connectionTokens(req.headers);
   const headers: OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(req.headers)) {
@@ -45,18 +51,25 @@ function responseHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
  * upgrades. Only called after the gateway has authenticated the request.
  */
 export class CanvasProxy {
-  constructor(private readonly upstream: CanvasUpstream, private readonly logger: Logger) {}
+  constructor(private readonly upstream: ProxyTarget | CanvasUpstream, private readonly logger: Logger) {}
 
-  web(req: IncomingMessage, res: ServerResponse, url: string): void {
+  /**
+   * Forwards to `target` (default: the canvas) at `url`. `adjust` may change
+   * the response headers (framing policy) before they are sent.
+   */
+  web(req: IncomingMessage, res: ServerResponse, url: string, options: { target?: ProxyTarget; adjust?: (headers: OutgoingHttpHeaders) => void } = {}): void {
+    const target = options.target ?? this.upstream;
     const proxyReq = http.request({
-      host: this.upstream.host,
-      port: this.upstream.port,
+      host: target.host,
+      port: target.port,
       method: req.method,
       path: url,
-      headers: requestHeaders(req, this.upstream),
+      headers: requestHeaders(req, target),
       agent: false
     }, proxyRes => {
-      res.writeHead(proxyRes.statusCode ?? 502, responseHeaders(proxyRes.headers));
+      const headers = responseHeaders(proxyRes.headers);
+      options.adjust?.(headers);
+      res.writeHead(proxyRes.statusCode ?? 502, headers);
       proxyRes.pipe(res);
       proxyRes.on('error', () => res.destroy());
     });
@@ -73,15 +86,24 @@ export class CanvasProxy {
     req.pipe(proxyReq);
   }
 
-  upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    const headers = requestHeaders(req, this.upstream);
+  /**
+   * Tunnels a WebSocket upgrade to `target` at `url`. `clientToUpstream`,
+   * when given, replaces the plain pipe from the browser to the canvas (the
+   * viewer filter); `onClose` runs once when the tunnel ends.
+   */
+  upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, options: { target?: ProxyTarget; url?: string; clientToUpstream?: (client: Duplex, upstream: Duplex) => void; onClose?: () => void } = {}): void {
+    const target = options.target ?? this.upstream;
+    let closed = false;
+    const finished = () => { if (!closed) { closed = true; options.onClose?.(); } };
+    socket.once('close', finished);
+    const headers = requestHeaders(req, target);
     headers.connection = 'Upgrade';
     headers.upgrade = req.headers.upgrade ?? 'websocket';
     const proxyReq = http.request({
-      host: this.upstream.host,
-      port: this.upstream.port,
+      host: target.host,
+      port: target.port,
       method: req.method,
-      path: req.url,
+      path: options.url ?? req.url,
       headers,
       agent: false
     });
@@ -98,9 +120,14 @@ export class CanvasProxy {
       }
       socket.write(`${lines.join('\r\n')}\r\n\r\n`);
       if (proxyHead.length > 0) socket.write(proxyHead);
-      if (head.length > 0) proxySocket.write(head);
       proxySocket.pipe(socket);
-      socket.pipe(proxySocket);
+      if (options.clientToUpstream) {
+        if (head.length > 0) socket.unshift(head);
+        options.clientToUpstream(socket, proxySocket);
+      } else {
+        if (head.length > 0) proxySocket.write(head);
+        socket.pipe(proxySocket);
+      }
       const close = () => { proxySocket.destroy(); socket.destroy(); };
       proxySocket.on('error', close);
       socket.on('error', close);

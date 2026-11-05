@@ -22,8 +22,11 @@ export const MCP_HTTP_PATH = '/mcp';
 export const MCP_AUTH_INFO_LOCAL = 'mcpAuthInfo';
 
 export interface McpHttpRouterOptions {
-  /** Upstream's server factory (the same tools stdio serves). */
-  factory: McpServerFactory;
+  /**
+   * Upstream's server factory for this request's board (the same tools stdio
+   * serves); undefined answers 404. Called after authentication.
+   */
+  factoryFor: (res: ExpressResponse) => Promise<McpServerFactory | undefined>;
   logger: Logger;
   /** The address the canvas server binds (`HOST`). Decides the DNS-rebinding guard. */
   bindHost: string;
@@ -37,6 +40,8 @@ export interface McpHttpRouterOptions {
    * default (auth off on a loopback bind).
    */
   authMiddleware?: RequestHandler[];
+  /** Runs after the body is read, before MCP processing (e.g. the viewer's read-only tool filter). */
+  bodyFilter?: RequestHandler;
   /** Request body limit, matching the REST API's JSON limit. */
   bodyLimit?: string;
 }
@@ -143,13 +148,22 @@ function dnsRebindingGuard(options: McpHttpRouterOptions): RequestHandler {
  *
  * Mount it before any JSON body parser: the SDK reads the raw body itself.
  */
-export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: express.Router; handler: McpHttpHandler } {
-  const handler = createMcpHandler(options.factory, {
-    // Reporting only: rejected requests are already answered on the wire.
-    onerror: error => {
-      options.logger.debug('MCP HTTP request error', { name: error.name, message: error.message });
+export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: express.Router } {
+  // One SDK handler per upstream factory (per board).
+  const handlers = new WeakMap<McpServerFactory, McpHttpHandler>();
+  const handlerFor = (factory: McpServerFactory): McpHttpHandler => {
+    let handler = handlers.get(factory);
+    if (!handler) {
+      handler = createMcpHandler(factory, {
+        // Reporting only: rejected requests are already answered on the wire.
+        onerror: error => {
+          options.logger.debug('MCP HTTP request error', { name: error.name, message: error.message });
+        }
+      });
+      handlers.set(factory, handler);
     }
-  });
+    return handler;
+  };
 
   const serve = async (req: ExpressRequest, res: ExpressResponse, next: NextFunction): Promise<void> => {
     const controller = new AbortController();
@@ -157,6 +171,12 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
       if (!res.writableFinished) controller.abort();
     });
     try {
+      const factory = await options.factoryFor(res);
+      if (!factory) {
+        res.status(404).json({ success: false, error: 'Board not found' });
+        return;
+      }
+      const handler = handlerFor(factory);
       const authInfo = res.locals[MCP_AUTH_INFO_LOCAL] as AuthInfo | undefined;
       const response = await handler.fetch(toWebRequest(req, controller.signal), authInfo ? { authInfo } : undefined);
       await sendWebResponse(response, res, options.logger);
@@ -172,7 +192,8 @@ export function createMcpHttpRouter(options: McpHttpRouterOptions): { router: ex
     dnsRebindingGuard(options),
     ...(options.authMiddleware ?? []),
     express.raw({ type: () => true, limit: options.bodyLimit ?? '10mb' }),
+    ...(options.bodyFilter ? [options.bodyFilter] : []),
     serve
   );
-  return { router, handler };
+  return { router };
 }

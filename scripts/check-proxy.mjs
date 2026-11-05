@@ -98,11 +98,12 @@ async function checkEnvironmentAndRestart() {
   }
   assert(!environ.some(entry => entry.includes(secret)), 'the signing secret never reaches the upstream');
   assert(environ.includes('HOST=127.0.0.1'), 'upstream binds 127.0.0.1');
-  const canvasDir = join(dataDir, 'canvas');
+  // Board main (today's canvas) lives in <data>/boards/main/canvas.
+  const canvasDir = join(dataDir, 'boards', 'main', 'canvas');
   assert(environ.includes(`EXCALIDRAW_DATA_DIR=${canvasDir}`), `upstream gets only its own data directory (${environ.filter(e => e.startsWith('EXCALIDRAW_DATA_DIR')).join()})`);
   assert(upstreamHealthDurable(gateway), 'upstream reports durable state enabled');
   assert(!existsSync(join(canvasDir, 'auth-store.json')) && !existsSync(join(canvasDir, 'auth-secret')), 'auth files stay out of the canvas directory');
-  ok('upstream canvas runs on 127.0.0.1 with none of the gateway\'s auth settings; it gets only <data>/canvas for durable state');
+  ok('upstream canvas runs on 127.0.0.1 with none of the gateway\'s auth settings; it gets only <data>/boards/main/canvas for durable state');
 
   process.kill(gateway.upstreamPid, 'SIGKILL');
   await waitFor(async () => (await json(`${gateway.base}/health`)).status === 503, 5000, '/health reports the crash');
@@ -156,8 +157,9 @@ async function checkDurability() {
   let gateway = await startGateway(env);
   assert(upstreamHealthDurable(gateway), 'durable state enabled by EXCALIDRAW_DATA_DIR');
   await createElements(gateway, 'durable');
-  assert(existsSync(join(dataDir, 'canvas', 'canvas-state-v1.json')), 'the canvas checkpoint lives in <data>/canvas');
-  assert((statSync(join(dataDir, 'canvas')).mode & 0o077) === 0, 'the canvas directory is private');
+  const mainDir = join(dataDir, 'boards', 'main', 'canvas');
+  assert(existsSync(join(mainDir, 'canvas-state-v1.json')), 'the canvas checkpoint lives in <data>/boards/main/canvas');
+  assert((statSync(mainDir).mode & 0o077) === 0, 'the canvas directory is private');
 
   // 1. The canvas process crashes (SIGKILL: no clean shutdown) and is restarted.
   process.kill(gateway.upstreamPid, 'SIGKILL');
@@ -185,10 +187,10 @@ async function checkDurability() {
   process.kill(upstreamPid, 'SIGKILL');
   gateway.child.kill('SIGKILL');
   await waitFor(() => !processAlive(upstreamPid) && gateway.child.signalCode !== null, 5000, 'both killed');
-  assert(existsSync(join(dataDir, 'canvas', 'canvas-state.lock')), 'a hard kill leaves the canvas lock behind');
+  assert(existsSync(join(mainDir, 'canvas-state.lock')), 'a hard kill leaves the canvas lock behind');
   gateway = await startGateway(env);
   assert(gateway.output().includes('Cleared a stale canvas data-directory lock'), `the gateway clears the stale lock before spawning: ${gateway.output()}`);
-  const lockDir = join(dataDir, 'canvas', 'canvas-state.lock');
+  const lockDir = join(mainDir, 'canvas-state.lock');
   const owner = JSON.parse(readFileSync(join(lockDir, readdirSync(lockDir)[0]), 'utf8'));
   assert(owner.pid === gateway.upstreamPid, `the lock now belongs to the new canvas (${JSON.stringify(owner)} vs ${gateway.upstreamPid})`);
   await expectElements(gateway, 'durable', 'after a hard kill of both');
@@ -235,7 +237,7 @@ async function checkSplitCanvas() {
   const canvasPort = await freePort();
   const dataDir = join(scratch, 'split');
   let canvas = await startCanvasRole(canvasPort, dataDir);
-  assert(canvas.pid > 0 && existsSync(join(dataDir, 'canvas')), 'the canvas role runs the upstream on <data>/canvas');
+  assert(canvas.pid > 0 && existsSync(join(dataDir, 'boards', 'main', 'canvas')), 'the canvas role runs board main on <data>/boards/main/canvas');
   const a = await startRemoteGateway(canvasPort);
   const b = await startRemoteGateway(canvasPort);
   for (const g of [a, b]) {

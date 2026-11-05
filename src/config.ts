@@ -1,4 +1,4 @@
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { parsePublicBaseUrl, parseTrustProxy } from './shared/network.js';
 
 export interface GatewayConfig {
@@ -8,10 +8,16 @@ export interface GatewayConfig {
   trustProxy: boolean | number | string;
   /** Internal port of the upstream canvas on 127.0.0.1; 0 picks a free one. */
   canvasPort: number;
-  /** Durable canvas state (upstream's EXCALIDRAW_DATA_DIR): CANVAS_DATA_DIR, else `$EXCALIDRAW_DATA_DIR/canvas`. */
+  /** EXCALIDRAW_DATA_DIR: boards.json, the auth files, and `boards/<id>/{canvas,files}` for every board. */
+  dataDir?: string;
+  /** CANVAS_DATA_DIR: board main's canvas directory instead of `$EXCALIDRAW_DATA_DIR/boards/main/canvas`. */
   canvasDataDir?: string;
-  /** Where upstream's MCP file tools may read and write: EXCALIDRAW_EXPORT_DIR, else `$EXCALIDRAW_DATA_DIR/files`. */
+  /** EXCALIDRAW_EXPORT_DIR: board main's export directory instead of `$EXCALIDRAW_DATA_DIR/boards/main/files`. */
   exportDir?: string;
+  /** BOARD_IDLE_SECONDS: a board's canvas stops after this long without use (main never does). */
+  boardIdleSeconds: number;
+  /** MAX_OPEN_BOARDS: at most this many canvases run at once, main included. */
+  maxOpenBoards: number;
   /**
    * PIZARRA_ROLE: `gateway` (default) serves the app; `canvas` only runs the
    * upstream canvas, for gateways elsewhere that point CANVAS_URL at it.
@@ -38,6 +44,13 @@ function readCanvasUrl(raw: string | undefined): URL | undefined {
   return url;
 }
 
+function readCount(name: string, raw: string | undefined, fallback: number, min: number, max: number): number {
+  const value = raw?.trim();
+  if (!value) return fallback;
+  if (!/^\d+$/.test(value) || Number(value) < min || Number(value) > max) throw new Error(`${name} must be a whole number from ${min} to ${max}, got ${JSON.stringify(value)}`);
+  return Number(value);
+}
+
 function readPort(name: string, raw: string | undefined, fallback: number): number {
   const value = raw?.trim();
   if (!value) return fallback;
@@ -52,8 +65,10 @@ export function resolveGatewayConfig(env: Record<string, string | undefined>): G
   const canvasPort = readPort('CANVAS_INTERNAL_PORT', env.CANVAS_INTERNAL_PORT, 0);
   if (canvasPort !== 0 && canvasPort === port) throw new Error('CANVAS_INTERNAL_PORT must differ from PORT');
   const dataDir = env.EXCALIDRAW_DATA_DIR?.trim();
-  const canvasDataDir = env.CANVAS_DATA_DIR?.trim() || (dataDir ? join(dataDir, 'canvas') : undefined);
-  const exportDir = env.EXCALIDRAW_EXPORT_DIR?.trim() || (dataDir ? join(dataDir, 'files') : undefined);
+  const canvasDataDir = env.CANVAS_DATA_DIR?.trim() || undefined;
+  const exportDir = env.EXCALIDRAW_EXPORT_DIR?.trim() || undefined;
+  const boardIdleSeconds = readCount('BOARD_IDLE_SECONDS', env.BOARD_IDLE_SECONDS, 600, 1, 7 * 86400);
+  const maxOpenBoards = readCount('MAX_OPEN_BOARDS', env.MAX_OPEN_BOARDS, 8, 1, 1000);
   const roleRaw = env.PIZARRA_ROLE?.trim() || 'gateway';
   if (roleRaw !== 'gateway' && roleRaw !== 'canvas') throw new Error(`PIZARRA_ROLE must be gateway or canvas, got ${JSON.stringify(roleRaw)}`);
   const role = roleRaw;
@@ -69,6 +84,9 @@ export function resolveGatewayConfig(env: Record<string, string | undefined>): G
     ...(publicBaseUrl ? { publicBaseUrl } : {}),
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
     canvasPort,
+    boardIdleSeconds,
+    maxOpenBoards,
+    ...(dataDir ? { dataDir: resolve(dataDir) } : {}),
     ...(canvasDataDir ? { canvasDataDir: resolve(canvasDataDir) } : {}),
     ...(exportDir ? { exportDir: resolve(exportDir) } : {})
   };
