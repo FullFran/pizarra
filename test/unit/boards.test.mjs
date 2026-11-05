@@ -4,7 +4,7 @@
 // shared boards.json store.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BoardService, JsonBoardStore, MemoryBoardStore, MAIN_BOARD, isBoardId } from '../../dist/boards/index.js';
@@ -84,8 +84,9 @@ test('an issuer creates its own board on its first ticket; nobody else opens it,
   assert.equal(boards.setMember(github('FullFran'), 'p1', 'alice', 'editor').ok, false);
 });
 
-test('boards.json is shared between stores on the same file, mode 0600', () => {
+test('boards.json is shared between stores on the same file, mode 0600', t => {
   const dir = mkdtempSync(join(tmpdir(), 'pizarra-boards-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'boards.json');
   const a = service(new JsonBoardStore(path));
   const b = service(new JsonBoardStore(path));

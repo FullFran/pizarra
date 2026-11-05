@@ -5,7 +5,7 @@
  * PIZARRA_ROLE=canvas it only runs the canvas pool, for gateways in other
  * containers.
  */
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -76,10 +76,16 @@ async function main(): Promise<void> {
 
   // MCP file tools: each board has its own export directory.
   if (config.dataDir && !config.exportDir) migrateToBoardMain(config.dataDir, 'files', logger);
-  const scratchRoot = config.dataDir ? undefined : mkdtempSync(join(tmpdir(), 'pizarra-files-'));
+  // Without a data directory nothing is durable: boards' files go to a temporary directory, removed on exit.
+  let scratchRoot: string | undefined;
   const exportDirOf = (board: string): string => {
     if (board === MAIN_BOARD && config.exportDir) return config.exportDir;
-    return config.dataDir ? join(config.dataDir, 'boards', board, 'files') : join(scratchRoot!, board);
+    if (config.dataDir) return join(config.dataDir, 'boards', board, 'files');
+    if (!scratchRoot) {
+      scratchRoot = mkdtempSync(join(tmpdir(), 'pizarra-files-'));
+      process.on('exit', () => rmSync(scratchRoot!, { recursive: true, force: true }));
+    }
+    return join(scratchRoot, board);
   };
   const mcp = new BoardMcpFactories({ canvasBaseUrl: upstream.baseUrl, exportDirOf });
 

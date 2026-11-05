@@ -3,7 +3,7 @@
 // the GitHub adapter stays the default.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HttpRequestAuthenticator } from '../../dist/auth/presentation/http/request-authenticator.js';
@@ -53,9 +53,11 @@ test('insufficient scope from any provider is a 403', () => {
   assert.deepEqual([result.status, result.error], [403, 'insufficient_scope']);
 });
 
+const dataDir = mkdtempSync(join(tmpdir(), 'pizarra-providers-'));
+process.on('exit', () => rmSync(dataDir, { recursive: true, force: true }));
 const fullEnv = () => ({
   PUBLIC_BASE_URL: 'https://board.example.com', GITHUB_CLIENT_ID: 'id', ALLOWED_GITHUB_LOGINS: 'FullFran',
-  AUTH_SECRET: 'x'.repeat(40), EXCALIDRAW_DATA_DIR: mkdtempSync(join(tmpdir(), 'pizarra-providers-'))
+  AUTH_SECRET: 'x'.repeat(40), EXCALIDRAW_DATA_DIR: dataDir
 });
 
 test('AUTH_PROVIDERS: github by default, unknown ids refused by name', () => {
