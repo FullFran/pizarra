@@ -72,3 +72,20 @@ test('framing: board pages for the listed origins only; upstream CSP directives 
   assert.deepEqual(framingHeaders('board', [], undefined), { csp: "frame-ancestors 'none'", xFrameOptions: 'DENY' });
   assert.deepEqual(framingHeaders('other', ['https://a.example'], "default-src 'self'; frame-ancestors *"), { csp: "default-src 'self'; frame-ancestors 'none'", xFrameOptions: 'DENY' });
 });
+
+test('viewer MCP requests fail closed: BOM decoded like the handler, unreadable bodies refused', async () => {
+  const { viewerRequestVerdict } = await import('../../dist/gateway/domain/viewer-policy.js');
+  const body = (value, prefix = []) => Buffer.concat([Buffer.from(prefix), Buffer.from(typeof value === 'string' ? value : JSON.stringify(value))]);
+  const call = name => ({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name } });
+  const bom = [0xef, 0xbb, 0xbf];
+  assert.equal(viewerRequestVerdict(body(call('create_element'), bom), {}).status, 403, 'a BOM does not hide a write');
+  assert.equal(viewerRequestVerdict(body(call('query_elements'), bom), {}).ok, true, 'a BOM-prefixed read is read');
+  assert.equal(viewerRequestVerdict(body([call('get_element'), call('clear_canvas')], bom), {}).status, 403, 'batches too');
+  for (const bad of ['{"jsonrpc":', 'nope', '[]', '[1]', 'null']) assert.equal(viewerRequestVerdict(body(bad), {}).status, 400, bad);
+  assert.equal(viewerRequestVerdict(Buffer.from([0xff, 0xfe, 0x7b, 0x00]), {}).status, 400, 'not UTF-8');
+  assert.equal(viewerRequestVerdict(body(call('query_elements')), { contentEncoding: 'gzip' }).status, 415);
+  assert.equal(viewerRequestVerdict(body(call('query_elements')), { contentType: 'application/json; charset=utf-16' }).status, 415);
+  assert.equal(viewerRequestVerdict(body(call('query_elements')), { contentType: 'application/json; charset=UTF-8' }).ok, true);
+  assert.equal(viewerRequestVerdict(body(call('query_elements')), { mcpMethod: 'tools/call', mcpName: 'create_element' }).status, 403, 'the mcp-name header is checked too');
+  assert.equal(viewerRequestVerdict(undefined, {}).ok, true, 'no body (GET, DELETE) calls no tool');
+});

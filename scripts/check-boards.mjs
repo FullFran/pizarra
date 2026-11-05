@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import {
-  assert, assertEqual, childPids, cookieHeader, freePort, githubEnv, githubLogin, killAll, mcpCall, mcpToolsList, obtainToken,
+  assert, assertEqual, childPids, cookieHeader, freePort, githubEnv, githubLogin, killAll, mcpCall, mcpRawCall, mcpToolsList, UTF8_BOM, obtainToken,
   request, sleep, startFakeGitHub, startGateway, waitFor, wsOpen
 } from './lib/harness.mjs';
 
@@ -275,6 +275,9 @@ async function checkInvitesAndViewers() {
     assertEqual(JSON.stringify(await elementIds(base, '/b/alpha', bobCookie)), '["after-viewer-frames","by-alice"]', 'nothing a viewer sent changed the board');
     const bobToken = await obtainToken(base, bob.jar, `${base}/b/alpha/mcp`);
     const bobBearer = { authorization: `Bearer ${bobToken.accessToken}` };
+    const bom = await mcpRawCall(base, '/b/alpha/mcp', 'create_element', element('by-bob-bom'), bobBearer, { prefix: UTF8_BOM });
+    assert(bom.status === 403 || bom.status === 400, `an invited viewer's BOM-prefixed create_element is refused (got ${bom.status}: ${bom.text.slice(0, 200)})`);
+    assertEqual((await request(base, { path: '/b/alpha/api/elements/by-bob-bom', headers: bobCookie })).status, 404, 'the refused BOM write did not happen');
     const write = await mcpCall(base, '/b/alpha/mcp', 'create_element', element('by-bob-mcp'), bobBearer);
     assertEqual(write.status, 403, `a viewer's agent cannot call create_element (${write.text.slice(0, 200)})`);
     assert(/read-only/.test(write.body?.error?.message ?? ''), 'the refusal says the board is read-only');

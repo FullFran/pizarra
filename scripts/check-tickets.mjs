@@ -11,7 +11,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  assert, assertEqual, cookieHeader, freePort, githubEnv, githubLogin, killAll, mcpCall, mcpToolsList, request, setCookies,
+  assert, assertEqual, cookieHeader, freePort, githubEnv, githubLogin, killAll, mcpCall, mcpRawCall, mcpToolsList, request, setCookies, UTF8_BOM,
   startFakeGitHub, startGateway, waitFor
 } from './lib/harness.mjs';
 
@@ -168,6 +168,21 @@ async function checkTickets() {
     const viewer = { authorization: `Bearer ${jws(claims(base, { role: 'viewer' }))}` };
     assertEqual((await mcpCall(base, '/b/p1/mcp', 'create_element', { id: 'by-viewer', type: 'rectangle', x: 0, y: 0, width: 1, height: 1 }, viewer)).status, 403, 'a viewer ticket cannot write over MCP');
     assert((await mcpCall(base, '/b/p1/mcp', 'query_elements', {}, viewer)).text.includes('from-agent'), 'a viewer ticket reads over MCP');
+    // The viewer filter fails closed: a body it cannot read is refused, never passed on.
+    const bomWrite = await mcpRawCall(base, '/b/p1/mcp', 'create_element', { id: 'by-viewer-bom', type: 'rectangle', x: 0, y: 0, width: 1, height: 1 }, viewer, { prefix: UTF8_BOM });
+    assert(bomWrite.status === 403 || bomWrite.status === 400, `a viewer's BOM-prefixed create_element is refused (got ${bomWrite.status}: ${bomWrite.text.slice(0, 200)})`);
+    for (const text of ['{"jsonrpc":"2.0","id":1,"method":"tools/call",', 'not json at all']) {
+      const garbled = await mcpRawCall(base, '/b/p1/mcp', 'create_element', {}, viewer, { text });
+      assert(garbled.status === 403 || garbled.status === 400, `a viewer's unparsable body is refused (got ${garbled.status})`);
+    }
+    const otherCharset = await mcpRawCall(base, '/b/p1/mcp', 'create_element', { id: 'by-viewer-latin1', type: 'rectangle', x: 0, y: 0, width: 1, height: 1 }, { ...viewer, 'content-type': 'application/json; charset=iso-8859-1' });
+    assert(otherCharset.status === 403 || otherCharset.status === 400 || otherCharset.status === 415, `a viewer's body in another charset is refused (got ${otherCharset.status})`);
+    for (const id of ['by-viewer-bom', 'by-viewer-latin1']) {
+      assertEqual((await request(base, { path: `/b/p1/api/elements/${id}`, headers: bearer })).status, 404, `the refused viewer write ${id} did not happen`);
+    }
+    const editorBom = await mcpRawCall(base, '/b/p1/mcp', 'create_element', { id: 'by-editor-bom', type: 'rectangle', x: 0, y: 0, width: 1, height: 1 }, bearer, { prefix: UTF8_BOM });
+    assertEqual(editorBom.status, 200, `an editor's BOM-prefixed create_element still works (${editorBom.text.slice(0, 200)})`);
+    assertEqual((await request(base, { path: '/b/p1/api/elements/by-editor-bom', headers: bearer })).status, 200, 'the editor\'s BOM-prefixed write happened');
     const viewerEntry = await enter(base, 'p1', jws(claims(base, { role: 'viewer' })));
     const viewerJar = setCookies(viewerEntry);
     const viewerCookie = { cookie: cookieHeader({ [cookieName]: viewerJar[cookieName] }), origin: base };

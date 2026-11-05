@@ -6,7 +6,7 @@ import type { AuthInfo, McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../../../shared/logger.js';
 import { DEFAULT_BOARD, parseBoardPath } from '../../domain/board-path.js';
 import { isPlainPath, isSafeMethod, isSameOrigin } from '../../domain/request-policy.js';
-import { toolsRefusedToViewer } from '../../domain/viewer-policy.js';
+import { viewerRequestVerdict } from '../../domain/viewer-policy.js';
 import { AccessGate } from '../../application/access-gate.js';
 import type { BoardDirectory, BoardRole, CanvasUpstream, Principal, RequestAuthenticator } from '../../application/ports.js';
 import type { CanvasProxy } from '../../infrastructure/canvas-proxy.js';
@@ -149,16 +149,14 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
   };
   const viewerToolFilter: RequestHandler = (req, res, next) => {
     if ((res.locals.role as BoardRole | undefined) !== 'viewer') return next();
-    let body: unknown;
-    try {
-      body = Buffer.isBuffer(req.body) && req.body.length > 0 ? JSON.parse(req.body.toString('utf8')) : undefined;
-    } catch {
-      return next();
-    }
-    const refused = toolsRefusedToViewer(body);
-    if (refused.length === 0) return next();
-    const id = !Array.isArray(body) && body && typeof body === 'object' ? (body as { id?: unknown }).id ?? null : null;
-    res.status(403).json({ jsonrpc: '2.0', id, error: { code: -32001, message: `This board is read-only for you: ${refused.join(', ')} not allowed` } });
+    const verdict = viewerRequestVerdict(Buffer.isBuffer(req.body) ? req.body : undefined, {
+      contentEncoding: single(req.headers['content-encoding']),
+      contentType: single(req.headers['content-type']),
+      mcpMethod: single(req.headers['mcp-method']),
+      mcpName: single(req.headers['mcp-name'])
+    });
+    if (verdict.ok) return next();
+    res.status(verdict.status).json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: verdict.message } });
   };
   // Mounted before any body parser: the SDK reads the raw body itself.
   const { router: mcpRouter } = createMcpHttpRouter({

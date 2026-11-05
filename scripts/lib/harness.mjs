@@ -48,11 +48,14 @@ export async function waitFor(predicate, timeoutMs, label) {
 }
 
 /** Raw request so Origin/Cookie/Host can be set freely; the path is sent as given. */
-export function request(base, { method = 'GET', path = '/', headers = {}, json, form } = {}) {
+export function request(base, { method = 'GET', path = '/', headers = {}, json, form, raw } = {}) {
   const origin = new URL(base);
   let payload;
   const extra = {};
-  if (json !== undefined) {
+  if (raw !== undefined) {
+    payload = raw;
+    extra['content-type'] = 'application/json';
+  } else if (json !== undefined) {
     payload = JSON.stringify(json);
     extra['content-type'] = 'application/json';
   } else if (form !== undefined) {
@@ -318,3 +321,15 @@ export function pssMiB(pid) {
   const kb = Number(/^Pss:\s+(\d+)/m.exec(rollup)?.[1] ?? 0);
   return Math.round(kb / 102.4) / 10;
 }
+
+/** A tools/call whose JSON body is sent as raw bytes (`prefix` first, e.g. a UTF-8 BOM). */
+export function mcpRawCall(base, path, name, args, headers = {}, { prefix = Buffer.alloc(0), text } = {}) {
+  const body = text ?? JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args, _meta: ENVELOPE } });
+  return request(base, {
+    method: 'POST', path,
+    headers: { accept: 'application/json, text/event-stream', 'mcp-protocol-version': MODERN_VERSION, 'mcp-method': 'tools/call', 'mcp-name': name, ...headers },
+    raw: Buffer.concat([prefix, Buffer.from(body)])
+  });
+}
+
+export const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);

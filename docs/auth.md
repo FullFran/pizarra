@@ -163,6 +163,8 @@ adapter, without touching the gateway, the boards or the other adapters:
 3. The `Identity` decides what the boards see: with `issuer` and `role` set, it is treated like a
    trusted issuer's ticket (its own issuer-owned boards, created through `context.admission`);
    `provider: 'github'` identities are GitHub logins (admins and members).
+   Any identity with an `issuer` is treated as a trusted issuer, so a new adapter must use an `issuer`
+   string unique to it (never another adapter's issuer id), or its people would open that issuer's boards.
 4. Add one line to `src/auth/plugins/registry.ts`, and a wire check like `scripts/check-tickets.mjs`.
 
 ## Create the GitHub OAuth app
