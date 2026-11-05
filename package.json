@@ -20,7 +20,8 @@
     "test:mcp-http": "node scripts/check-mcp-http.mjs",
     "test:proxy": "node scripts/check-proxy.mjs",
     "test:boards": "node scripts/check-boards.mjs",
-    "test": "npm run build && npm run test:unit && npm run test:auth && npm run test:mcp-http && npm run test:proxy && npm run test:boards"
+    "test:tickets": "node scripts/check-tickets.mjs",
+    "test": "npm run build && npm run test:unit && npm run test:auth && npm run test:mcp-http && npm run test:proxy && npm run test:boards && npm run test:tickets"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",

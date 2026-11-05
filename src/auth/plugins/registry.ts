@@ -1,4 +1,5 @@
 import { githubPlugin } from './github.js';
+import { trustedIssuerPlugin } from './trusted-issuer.js';
 import type { AuthPluginDefinition } from './types.js';
 
 /**
@@ -6,7 +7,8 @@ import type { AuthPluginDefinition } from './types.js';
  * Adding an adapter is one new file next to this one and one line here.
  */
 export const AUTH_PLUGINS: Readonly<Record<string, AuthPluginDefinition<any>>> = {
-  [githubPlugin.id]: githubPlugin
+  [githubPlugin.id]: githubPlugin,
+  [trustedIssuerPlugin.id]: trustedIssuerPlugin
 };
 
 /** `AUTH_PROVIDERS` when unset: GitHub sign-in, as before plugins existed. */

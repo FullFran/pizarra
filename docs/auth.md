@@ -1,6 +1,6 @@
 # Authentication
 
-The pizarra gateway protects everything the whiteboard serves — the MCP endpoint (`/mcp`), the canvas page and its assets, the REST API (`/api/*`) and the WebSocket — with OAuth 2.1. You sign in with GitHub, and only the GitHub accounts you list get in. There are no local passwords.
+The pizarra gateway protects everything the whiteboard serves — every board's MCP endpoint (`/b/<id>/mcp`, and `/mcp` for board `main`), its canvas page and assets, its REST API and its WebSocket. How people and agents get in is a plugin: by default you sign in with GitHub (OAuth 2.1 for agents), and only the GitHub accounts you list, and the people they invite to a board, get in; a trusted issuer such as Hagalink Projects can also hand out signed board tickets. There are no local passwords. Boards, roles and invites are described in [docs/multiuser.md](multiuser.md).
 
 ## Topology
 
@@ -30,9 +30,12 @@ On a loopback bind, GitHub or auth variables without `AUTH_MODE=oauth` are ignor
 | Variable | Required when on | Meaning |
 |---|---|---|
 | `AUTH_MODE` | – | `oauth` or `off`. See the table above. |
+| `AUTH_PROVIDERS` | no | Comma-separated auth adapters, in the order they are asked: `github` (default), `trusted-issuer`. See [Auth providers](#auth-providers). |
 | `PUBLIC_BASE_URL` | yes | Public origin, e.g. `https://board.example.com`. Must be `https` (plain `http` only for `127.0.0.1`/`localhost`) and must not have a path. It is the OAuth issuer; the protected resource is `${PUBLIC_BASE_URL}/mcp`. |
-| `GITHUB_CLIENT_ID` | yes | Client ID of your GitHub OAuth app (public; not a secret). |
-| `ALLOWED_GITHUB_LOGINS` | yes | Comma-separated GitHub logins allowed to sign in, case-insensitive, e.g. `FullFran`. **There is no default**: if it is unset the server refuses to start, so nobody gets in by accident. |
+| `GITHUB_CLIENT_ID` | with `github` | Client ID of your GitHub OAuth app (public; not a secret). |
+| `ALLOWED_GITHUB_LOGINS` | with `github` | Comma-separated GitHub logins of the **admins**, case-insensitive, e.g. `FullFran`: they own every GitHub board and create boards. Anyone else gets in only once invited to a board. **There is no default**: if it is unset the server refuses to start, so nobody gets in by accident. |
+| `TRUSTED_ISSUERS` or `TRUSTED_ISSUERS_FILE` | with `trusted-issuer` | JSON array of the issuers whose signed board tickets are accepted. See [Trusted issuers](#trusted-issuers-signed-board-tickets). |
+| `TRUSTED_ISSUER_SESSION_TTL_SECONDS` | no | Lifetime of the board session a browser gets for a ticket. Default `28800` (8 h), 60–86400. |
 | `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`), with the fork's names and format; the boards and their members in `boards.json` (`0600`). It also turns on durable canvas state: each board keeps its canvas in `boards/<id>/canvas/` and its MCP files in `boards/<id>/files/` (see [docs/multiuser.md](multiuser.md); a single-canvas `canvas/` and `files/` are moved to board `main` on the first start). |
 | `CANVAS_DATA_DIR` | no | Board `main`'s canvas directory (upstream's `EXCALIDRAW_DATA_DIR`) instead of `$EXCALIDRAW_DATA_DIR/boards/main/canvas`; nothing is migrated when it is set. The fork kept `canvas-state-v1.json` and `blobs/` at the data directory's root: set `CANVAS_DATA_DIR` to the root to keep a fork-era drawing. |
 | `EXCALIDRAW_EXPORT_DIR` | no | Board `main`'s export directory (the only one its MCP file tools may read and write) instead of `$EXCALIDRAW_DATA_DIR/boards/main/files`. Every other board uses `boards/<id>/files`. |
@@ -53,6 +56,93 @@ On a loopback bind, GitHub or auth variables without `AUTH_MODE=oauth` are ignor
 `GITHUB_CLIENT_SECRET` and `GITHUB_CLIENT_SECRET_FILE` are no longer used. If one is still set, the server starts and logs a warning; remove it.
 
 The generated `auth-secret` file is checked on every start: if it is readable by group or others, or shorter than 32 characters, the server refuses to start and says how to fix it (`chmod 600`, or delete it to generate a new one). It is created atomically (written to a temporary `0600` file, then linked into place), so two starts never overwrite each other's secret. Back up the data directory as a whole: losing `auth-secret` only signs browsers out, since tokens are stored separately.
+
+## Auth providers
+
+Each way in is an **auth adapter** (a plugin) behind one port, `IdentityProvider`
+(`src/auth/application/identity.ts`). `AUTH_PROVIDERS` lists the enabled ones, in order; the
+gateway asks each in turn and the first that vouches for the request wins. Nothing else in the
+code knows how a person or agent got in: every adapter answers with the same `Identity`.
+
+| Adapter | Id | People | Agents |
+|---|---|---|---|
+| GitHub (default) | `github` | GitHub device flow → session cookie | OAuth 2.1 tokens from this server, one board's resource each |
+| Trusted issuer | `trusted-issuer` | `GET /b/<id>/enter?ticket=…` → session cookie for that board | `Authorization: Bearer <ticket>` on `/b/<id>/mcp` |
+
+Examples: `AUTH_PROVIDERS=github` (pizarra.fullfran.com, unchanged); `AUTH_PROVIDERS=trusted-issuer`
+(an instance only reachable from Hagalink Projects: no GitHub app, no `ALLOWED_GITHUB_LOGINS`);
+`AUTH_PROVIDERS=github,trusted-issuer` (both). Each adapter checks its own variables at startup and
+names the missing ones.
+
+### Trusted issuers (signed board tickets)
+
+An application that already knows who its users are (Hagalink Projects) signs a short **board
+ticket** for one person, one board and one role, with its own private key. pizarra only holds the
+public keys, never a shared secret, and never sees the application's own session token.
+
+```bash
+AUTH_PROVIDERS=trusted-issuer
+TRUSTED_ISSUERS='[
+  {"issuer": "https://app.hagalink.es", "alg": "EdDSA", "jwks_url": "https://app.hagalink.es/.well-known/pizarra-jwks.json"},
+  {"issuer": "https://other.example", "alg": "ES256", "keys": [{"kty": "EC", "crv": "P-256", "x": "…", "y": "…", "kid": "2026-11"}]}
+]'
+```
+
+| Field | Meaning |
+|---|---|
+| `issuer` | The ticket's `iss`, exactly. |
+| `alg` | `EdDSA` (Ed25519) or `ES256` (P-256). Anything else, `HS256` and every `HS*` above all, refuses to start; a ticket signed with any other algorithm than its issuer's is rejected, even if it is otherwise valid. |
+| `jwks_url` | Where the issuer publishes its public keys (RFC 7517 JWKS). `https` (plain `http` only on loopback); no redirects, 64 KiB, 5 s. Read at startup, every 10 minutes, and when a ticket names a `kid` not seen yet (at most every 30 s), so keys can rotate. |
+| `keys` | Instead of `jwks_url`: the public JWKs, pinned (for an issuer reachable only on a private network). A private key (`d`) refuses to start. |
+
+The ticket is a compact JWS (a JWT) with these claims:
+
+| Claim | Rule |
+|---|---|
+| `iss` | A configured issuer. |
+| `aud` | This pizarra's `PUBLIC_BASE_URL` (a string, or an array containing it). |
+| `sub` | Opaque, stable id of the person in the issuer (at most 256 characters). |
+| `name` | Optional display name. |
+| `board` | The board id (`[a-z0-9][a-z0-9-]{0,62}`). |
+| `role` | `editor` or `viewer`. |
+| `jti` | Unique id of the ticket. |
+| `exp` | At most 5 minutes ahead (30 s of clock skew tolerated); with `iat`, `exp - iat` at most 300. `nbf` is honoured. |
+
+- **Browser:** open (or frame) `https://pizarra.example/b/<board>/enter?ticket=<jws>` (add `&embed=1`
+  for the embedded view). A valid ticket is used **once** (decided in the shared store, so across
+  gateways only one entry wins), sets an `HttpOnly`, `SameSite=Lax` session cookie for that board
+  only (`__Host-wb_b_<board>`), and redirects to `/b/<board>/`. The redirect sends no `Referer`, and
+  the ticket is never logged. A rejected ticket (bad signature, wrong `aud`, expired, reused, for
+  another board, `HS256`, unknown issuer) ends on an error page and sets nothing.
+- **Agents:** send the ticket as `Authorization: Bearer <jws>` to `/b/<board>/mcp` (also the board's
+  REST API and WebSocket). It is not single use for agents, but it expires within five minutes and
+  opens only its board; the issuer hands its agent a fresh one as needed. `viewer` tickets may call
+  only the read-only MCP tools.
+- **Boards:** the first valid ticket for a board id that does not exist creates it, owned by that
+  issuer. From then on only that issuer's tickets open it: never another issuer's, never a GitHub
+  account (admins included), and a ticket never opens a GitHub board or `main`. Issuer boards have
+  no invites: the issuer decides who gets a ticket.
+
+### Writing an auth adapter
+
+Letting another organisation's people in (an OIDC provider, another company's tickets) is one new
+adapter, without touching the gateway, the boards or the other adapters:
+
+1. Write `src/auth/plugins/<id>.ts` exporting an `AuthPluginDefinition` (`src/auth/plugins/types.ts`):
+   - `id`: the name used in `AUTH_PROVIDERS`.
+   - `missing(env)`: the required variables that are unset (reported with the core ones).
+   - `configure(env, { issuer, dataDir })`: read and validate its variables; throw `AuthConfigError` on a bad value.
+   - `build(context, config)`: return `{ provider, router?, challenge?, warmUp? }`. `context` gives the
+     shared signer (signed and sealed cookies), the shared store (`claimOnce` for single use), the cookie
+     jar, the clock, the logger, the boards' `admission` and the access `policy`.
+2. Its `provider` implements `IdentityProvider`: `bearer(token, target)` and/or
+   `session(cookies, target)` answer `none` (not my kind of credential), `invalid`, or `ok` with an
+   `Identity`. Checks are synchronous; `prepare(bearer)` may fetch keys first. `target.board` is the
+   board the request is for: a board-scoped credential must refuse any other.
+3. The `Identity` decides what the boards see: with `issuer` and `role` set, it is treated like a
+   trusted issuer's ticket (its own issuer-owned boards, created through `context.admission`);
+   `provider: 'github'` identities are GitHub logins (admins and members).
+4. Add one line to `src/auth/plugins/registry.ts`, and a wire check like `scripts/check-tickets.mjs`.
 
 ## Create the GitHub OAuth app
 
@@ -115,7 +205,9 @@ Path matching is case-insensitive (`/API/elements` is `/api/…`), as Express ro
 | `/oauth/token` | `authorization_code` and `refresh_token` grants |
 | `/oauth/login` | Sign-in page (`GET`); `POST` from the same origin starts a GitHub device login |
 | `/oauth/device`, `/oauth/device/poll`, `/oauth/device.js` | The code page, its same-origin status check, and the script that polls it |
-| `/oauth/logout` | `POST` from the same origin clears the session cookie |
+| `/oauth/logout` | `POST` from the same origin clears every session cookie (GitHub and board tickets) |
+| `/b/<id>/enter` | Trusted issuers: trades a signed board ticket for that board's session cookie (`trusted-issuer`) |
+| `/boards`, `/b/<id>/members[/<login>]` | Boards API: list and create boards, invite and remove members ([docs/multiuser.md](multiuser.md)) |
 
 Protocol details:
 
@@ -181,6 +273,8 @@ Defended against:
 - **Clickjacking of the consent page:** `X-Frame-Options: DENY` and `frame-ancestors 'none'`.
 - **SSRF through client metadata URLs:** https only, public addresses only, pinned connection, no redirects, size and time limits.
 - **Store disclosure:** the store holds only hashes; a copy of it does not grant access.
+- **Board tickets:** asymmetric signatures only (EdDSA, ES256; `HS*` and `none` always refused), the issuer's configured algorithm only, audience-bound to this pizarra, five-minute lifetime, single use in browsers (`claimOnce` in the shared store), one board each, never logged. A compromised issuer key opens only that issuer's boards.
+- **Cross-board access:** every token, ticket and board cookie opens one board (or, for GitHub sessions, the boards the account is a member of); a board you cannot open answers `404`, like one that does not exist.
 
 Assumptions:
 

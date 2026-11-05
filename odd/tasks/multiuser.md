@@ -18,7 +18,7 @@ Branch: `feat/multiuser-pluggable-auth` (worktree `pizarra-multiuser`). Delivery
 | T2 | S2 | inline | done | identity provider port, plugin registry, AUTH_PROVIDERS; GitHub adapter unchanged (auth 41 groups green); unit providers.test.mjs |
 | T3 | S1 | inline | done (43f03c6) | RED: check-boards 0/4 on 7dbe546 (POST /boards 404). GREEN: check-boards 4 groups; proxy 11 (paths updated to boards/main); auth 41; MCP 9; unit 63; memory measured (docs/multiuser.md) |
 | T4 | S5 | inline | done | invites/viewer group in check-boards (5 groups); viewer code landed in T3, so no RED for it: mutation check instead (viewer REST filter disabled -> "a viewer cannot POST /b/alpha/api/elements (expected 403, got 200)"); unit gateway-boards.test.mjs (frame filter, tool list, path parser) |
-| T5 | S3 | inline | pending | |
+| T5 | S3, S2 | inline | done | RED: check-tickets against 12793b7 ("AUTH_PROVIDERS lists an unknown provider \"trusted-issuer\""). GREEN: check-tickets 4 groups; unit tickets.test.mjs; npm test all green |
 | T6 | S4 | inline | pending | |
 | T7 | S1-S5 docs | inline | pending | |
 
