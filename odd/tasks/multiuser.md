@@ -15,7 +15,7 @@ Branch: `feat/multiuser-pluggable-auth` (worktree `pizarra-multiuser`). Delivery
 | ID | Specs | Route | Status | Evidence |
 |----|-------|-------|--------|----------|
 | T1 | S1, S5 | inline | done | boards context + shared locked JSON file; unit tests |
-| T2 | S2 | inline | pending | |
+| T2 | S2 | inline | done | identity provider port, plugin registry, AUTH_PROVIDERS; GitHub adapter unchanged (auth 41 groups green); unit providers.test.mjs |
 | T3 | S1 | inline | pending | |
 | T4 | S5 | inline | pending | |
 | T5 | S3 | inline | pending | |

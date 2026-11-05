@@ -1,18 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { Allowlist, InvalidLoginError } from '../domain/allowlist.js';
+import { Allowlist } from '../domain/allowlist.js';
 import type { AuthSettings } from '../application/settings.js';
 import type { SecretProvider } from '../application/ports.js';
 import { LOOPBACK_URL_HOSTS, isLoopbackBindHost, parsePublicBaseUrl } from '../../shared/network.js';
 import { MIN_SECRET_LENGTH, SecretError, StaticSecret, loadOrCreateGeneratedSecret } from './signing-secret.js';
 import type { GitHubEndpoints } from './github-device-flow.js';
+import { AuthConfigError, readSecretVariable, readTtl } from './config-error.js';
+import type { Env } from './config-error.js';
+import { AUTH_PLUGINS, DEFAULT_AUTH_PROVIDERS } from '../plugins/registry.js';
 
-export class AuthConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'AuthConfigError';
-  }
-}
+export { AuthConfigError } from './config-error.js';
 
 export interface AuthOffConfig {
   mode: 'off';
@@ -25,7 +23,10 @@ export interface AuthOnConfig {
   settings: AuthSettings;
   /** Whether cookies get `Secure` and the `__Host-` prefix (the issuer is https). */
   secureCookies: boolean;
-  github: GitHubEndpoints & { appName?: string };
+  /** Present when the GitHub provider is enabled. */
+  github?: GitHubEndpoints & { appName?: string };
+  /** Enabled auth adapters (`AUTH_PROVIDERS`), in order, with their own configuration. */
+  providers?: Array<{ id: string; config: unknown }>;
   /** Non-fatal configuration notes to log at startup. */
   warnings: string[];
   secret: SecretProvider;
@@ -35,51 +36,22 @@ export interface AuthOnConfig {
 
 export type AuthConfig = AuthOffConfig | AuthOnConfig;
 
-type Env = Record<string, string | undefined>;
-
 export interface AuthConfigOptions {
   /** Paths of the protected resources on the issuer's origin; each becomes an audience (RFC 8707). */
   resourcePaths: string[];
 }
 
-function readSecret(env: Env, name: string): string | undefined {
-  const direct = env[name]?.trim();
-  const filePath = env[`${name}_FILE`]?.trim();
-  if (direct && filePath) throw new AuthConfigError(`Set only one of ${name} and ${name}_FILE.`);
-  if (direct) return direct;
-  if (filePath) {
-    let value: string;
-    try {
-      value = readFileSync(filePath, 'utf8').trim();
-    } catch (error) {
-      throw new AuthConfigError(`Cannot read ${name}_FILE (${filePath}): ${(error as Error).message}`);
+function readProviders(env: Env): string[] {
+  const raw = env.AUTH_PROVIDERS?.trim();
+  if (!raw) return [...DEFAULT_AUTH_PROVIDERS];
+  const ids = [...new Set(raw.split(',').map(id => id.trim().toLowerCase()).filter(Boolean))];
+  if (ids.length === 0) throw new AuthConfigError('AUTH_PROVIDERS must list at least one provider.');
+  for (const id of ids) {
+    if (!Object.prototype.hasOwnProperty.call(AUTH_PLUGINS, id)) {
+      throw new AuthConfigError(`AUTH_PROVIDERS lists an unknown provider ${JSON.stringify(id)}; known: ${Object.keys(AUTH_PLUGINS).join(', ')}.`);
     }
-    if (value) return value;
-    throw new AuthConfigError(`${name}_FILE (${filePath}) is empty.`);
   }
-  return undefined;
-}
-
-function readTtl(env: Env, name: string, fallback: number, min: number, max: number): number {
-  const raw = env[name]?.trim();
-  if (!raw) return fallback;
-  if (!/^\d+$/.test(raw)) throw new AuthConfigError(`${name} must be a whole number of seconds, got ${JSON.stringify(raw)}.`);
-  const value = Number(raw);
-  if (value < min || value > max) throw new AuthConfigError(`${name} must be between ${min} and ${max}, got ${value}.`);
-  return value;
-}
-
-function normalizeBaseUrl(name: string, raw: string): string {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new AuthConfigError(`${name} must be an absolute URL, got ${JSON.stringify(raw)}.`);
-  }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new AuthConfigError(`${name} must use http or https, got ${JSON.stringify(raw)}.`);
-  }
-  return `${url.origin}${url.pathname}`.replace(/\/+$/, '');
+  return ids;
 }
 
 /**
@@ -112,6 +84,8 @@ export function resolveAuthConfig(bindHost: string, env: Env, options: AuthConfi
     return { mode: 'off', insecure: true };
   }
 
+  const providerIds = readProviders(env);
+  const plugins = providerIds.map(id => AUTH_PLUGINS[id]!);
   const missing: string[] = [];
   const reason = mode === 'oauth' ? 'AUTH_MODE=oauth' : `HOST=${bindHost} is not loopback`;
   let issuer: string | undefined;
@@ -121,17 +95,10 @@ export function resolveAuthConfig(bindHost: string, env: Env, options: AuthConfi
     throw new AuthConfigError((error as Error).message);
   }
   if (!issuer) missing.push('PUBLIC_BASE_URL');
-  const clientId = env.GITHUB_CLIENT_ID?.trim();
-  if (!clientId) missing.push('GITHUB_CLIENT_ID');
-  const warnings: string[] = [];
-  for (const name of ['GITHUB_CLIENT_SECRET', 'GITHUB_CLIENT_SECRET_FILE']) {
-    if (env[name]?.trim()) {
-      warnings.push(`${name} is set but no longer used: GitHub login uses the device flow with the public client ID only. Remove it.`);
-    }
-  }
-  const explicitSecret = readSecret(env, 'AUTH_SECRET');
-  const loginsRaw = env.ALLOWED_GITHUB_LOGINS?.trim();
-  if (!loginsRaw) missing.push('ALLOWED_GITHUB_LOGINS');
+  const pluginMissing = plugins.flatMap(plugin => plugin.missing(env));
+  missing.push(...pluginMissing.filter(name => name !== 'ALLOWED_GITHUB_LOGINS'));
+  const explicitSecret = readSecretVariable(env, 'AUTH_SECRET', path => readFileSync(path, 'utf8'));
+  if (pluginMissing.includes('ALLOWED_GITHUB_LOGINS')) missing.push('ALLOWED_GITHUB_LOGINS');
   const dataDir = env.EXCALIDRAW_DATA_DIR?.trim();
   if (!dataDir) missing.push('EXCALIDRAW_DATA_DIR');
   if (missing.length > 0) {
@@ -152,17 +119,14 @@ export function resolveAuthConfig(bindHost: string, env: Env, options: AuthConfi
   if (explicitSecret !== undefined && explicitSecret.length < MIN_SECRET_LENGTH) {
     throw new AuthConfigError(`AUTH_SECRET must be at least ${MIN_SECRET_LENGTH} characters (use e.g. \`openssl rand -base64 48\`).`);
   }
-  let allowedLogins: Allowlist;
-  try {
-    allowedLogins = Allowlist.parse(loginsRaw!);
-  } catch (error) {
-    if (error instanceof InvalidLoginError) throw new AuthConfigError(error.message);
-    throw error;
-  }
-  const appName = env.GITHUB_APP_NAME?.trim();
-  if (appName !== undefined && appName.length > 100) throw new AuthConfigError('GITHUB_APP_NAME must be at most 100 characters.');
-  const oauthBaseUrl = normalizeBaseUrl('GITHUB_OAUTH_BASE_URL', env.GITHUB_OAUTH_BASE_URL?.trim() || 'https://github.com');
-  const apiBaseUrl = normalizeBaseUrl('GITHUB_API_BASE_URL', env.GITHUB_API_BASE_URL?.trim() || 'https://api.github.com');
+  const base = url.origin;
+  const warnings: string[] = [];
+  const providers = plugins.map(plugin => {
+    const configured = plugin.configure(env, { issuer: base, dataDir: resolve(dataDir!) });
+    warnings.push(...configured.warnings);
+    return { id: plugin.id, config: configured.config };
+  });
+  const github = providers.find(provider => provider.id === 'github')?.config as (GitHubEndpoints & { appName?: string; allowedLogins: Allowlist }) | undefined;
   const accessTokenTtlSeconds = readTtl(env, 'AUTH_ACCESS_TOKEN_TTL_SECONDS', 3600, 1, 86400);
   const refreshTokenTtlSeconds = readTtl(env, 'AUTH_REFRESH_TOKEN_TTL_SECONDS', 30 * 86400, 60, 90 * 86400);
   const sessionTtlSeconds = readTtl(env, 'AUTH_SESSION_TTL_SECONDS', 7 * 86400, 60, 30 * 86400);
@@ -178,20 +142,21 @@ export function resolveAuthConfig(bindHost: string, env: Env, options: AuthConfi
     throw error;
   }
 
-  const base = url.origin;
   return {
     mode: 'oauth',
     settings: {
       issuer: base,
       resources: options.resourcePaths.map(path => `${base}${path}`),
-      allowedLogins,
+      // The GitHub admins; without the GitHub provider nobody signs in with GitHub.
+      allowedLogins: github?.allowedLogins ?? new Allowlist([]),
       accessTokenTtlSeconds,
       refreshTokenTtlSeconds,
       sessionTtlSeconds,
       authorizationCodeTtlSeconds: 60
     },
     secureCookies: url.protocol === 'https:',
-    github: { clientId: clientId!, ...(appName ? { appName } : {}), oauthBaseUrl, apiBaseUrl },
+    ...(github ? { github: { clientId: github.clientId, ...(github.appName ? { appName: github.appName } : {}), oauthBaseUrl: github.oauthBaseUrl, apiBaseUrl: github.apiBaseUrl } } : {}),
+    providers,
     warnings,
     secret,
     storePath: join(resolve(dataDir!), 'auth-store.json')

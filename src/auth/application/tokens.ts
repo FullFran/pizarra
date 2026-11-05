@@ -2,6 +2,8 @@ import { ClientError } from '../domain/client.js';
 import type { ResolvedClient } from '../domain/client.js';
 import { pkceS256Matches } from '../domain/pkce.js';
 import { chooseResource } from '../domain/resource.js';
+import { StaticAccessPolicy, selectResource } from './identity.js';
+import type { AccessPolicy } from './identity.js';
 import { withinGrant } from '../domain/scope.js';
 import type { RefreshTokenRecord, TokenRecord } from '../domain/token.js';
 import type { AuthorizationCodes } from './authorization-codes.js';
@@ -41,7 +43,8 @@ export class TokenService {
     private readonly hasher: Hasher,
     private readonly random: RandomSource,
     private readonly clock: Clock,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly policy: AccessPolicy = new StaticAccessPolicy(settings)
   ) {}
 
   async exchange(credentials: ClientCredentials, request: TokenRequest): Promise<TokenResult> {
@@ -57,8 +60,8 @@ export class TokenService {
     if (!this.clients.authenticate(client, credentials.clientSecret)) {
       return fail(401, 'invalid_client', 'client authentication failed', credentials.usedBasic);
     }
-    if (request.resource !== undefined && !chooseResource(request.resource, this.settings.resources).ok) {
-      return fail(400, 'invalid_target', `resource must be one of ${this.settings.resources.join(', ')}`);
+    if (request.resource !== undefined && !selectResource(request.resource, this.settings.resources[0]!, this.policy).ok) {
+      return fail(400, 'invalid_target', 'resource must be this server\'s MCP endpoint or one of its boards\' (/b/<id>/mcp)');
     }
 
     if (request.grantType === 'authorization_code') {
@@ -96,7 +99,7 @@ export class TokenService {
         return fail(400, 'invalid_grant', 'refresh token already used');
       }
       if (!this.store.isFamilyActive(record.familyId)) return fail(400, 'invalid_grant', 'refresh token revoked');
-      if (!this.settings.allowedLogins.has(record.login)) return fail(400, 'invalid_grant', 'account no longer allowed');
+      if (!this.policy.mayUse(record.login, record.resource)) return fail(400, 'invalid_grant', 'account no longer allowed');
       if (!withinGrant(request.scope, record.scope)) return fail(400, 'invalid_scope', 'scope exceeds the original grant');
       if (!this.store.markRefreshTokenUsed(hash)) {
         // Another exchange (maybe on the other gateway) won the race: same as reuse.
