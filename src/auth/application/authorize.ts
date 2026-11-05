@@ -2,7 +2,6 @@ import { ClientError } from '../domain/client.js';
 import type { ResolvedClient } from '../domain/client.js';
 import { PKCE_METHOD, isValidCodeChallenge } from '../domain/pkce.js';
 import { redirectUriMatches } from '../domain/redirect-uri.js';
-import { chooseResource } from '../domain/resource.js';
 import { WHITEBOARD_SCOPE, onlyKnownScopes, requestedScopes } from '../domain/scope.js';
 import type { AuthorizationCodes } from './authorization-codes.js';
 import type { ClientRegistry } from './clients.js';
@@ -10,6 +9,8 @@ import type { SessionService } from './sessions.js';
 import type { AuthSettings } from './settings.js';
 import type { Clock, RandomSource, TicketSigner, TokenStore } from './ports.js';
 import { nowSeconds } from './ports.js';
+import { StaticAccessPolicy, selectResource } from './identity.js';
+import type { AccessPolicy } from './identity.js';
 
 const CONSENT_PURPOSE = 'consent';
 const CONSENT_TTL_SECONDS = 600;
@@ -32,6 +33,8 @@ export interface ConsentView {
   redirectUri: string;
   scope: string;
   login: string;
+  /** What the token will open (a board), as the consent page names it. */
+  resourceName: string;
   ticket: string;
 }
 
@@ -80,7 +83,8 @@ export class AuthorizationService {
     private readonly signer: TicketSigner,
     private readonly random: RandomSource,
     private readonly clock: Clock,
-    private readonly store: TokenStore
+    private readonly store: TokenStore,
+    private readonly policy: AccessPolicy = new StaticAccessPolicy(settings)
   ) {}
 
   redirect(redirectUri: string, params: Record<string, string | undefined>): ClientRedirect {
@@ -112,11 +116,14 @@ export class AuthorizationService {
     if (query.codeChallengeMethod !== PKCE_METHOD) return fail('invalid_request', 'code_challenge_method must be S256');
     if (!isValidCodeChallenge(challenge)) return fail('invalid_request', 'malformed code_challenge');
     if (!onlyKnownScopes(requestedScopes(query.scope))) return fail('invalid_scope', `only the "${WHITEBOARD_SCOPE}" scope is available`);
-    const resource = chooseResource(query.resource, this.settings.resources);
-    if (!resource.ok) return fail('invalid_target', `resource must be one of ${this.settings.resources.join(', ')}`);
+    const resource = selectResource(query.resource, this.settings.resources[0]!, this.policy);
+    if (!resource.ok) return fail('invalid_target', 'resource must be this server\'s MCP endpoint or one of its boards\' (/b/<id>/mcp)');
 
     const session = this.sessions.read(sessionValue);
     if (!session) return { kind: 'login' };
+    if (!this.policy.mayUse(session.login, resource.resource)) {
+      return errorPage(403, 'No access', `The GitHub account ${session.login} cannot open this board. Ask its owner for an invite.`);
+    }
     const ticket = this.signer.sign(CONSENT_PURPOSE, {
       tid: this.random.token(16),
       clientId: client.clientId,
@@ -137,6 +144,7 @@ export class AuthorizationService {
         redirectUri,
         scope: WHITEBOARD_SCOPE,
         login: session.login,
+        resourceName: this.policy.describeResource(resource.resource)?.name ?? resource.resource,
         ticket
       }
     };
@@ -166,6 +174,10 @@ export class AuthorizationService {
       return errorPage(400, 'Invalid redirect', 'redirect_uri is no longer registered for this client.');
     }
     const state = ticket.state ?? undefined;
+    // Membership may have changed since the consent page was shown.
+    if (decision === 'approve' && !this.policy.mayUse(session.login, ticket.resource)) {
+      return this.redirect(ticket.redirectUri, { error: 'access_denied', error_description: 'no access to this resource', state });
+    }
     if (decision !== 'approve') {
       return this.redirect(ticket.redirectUri, { error: 'access_denied', error_description: 'the user denied access', state });
     }

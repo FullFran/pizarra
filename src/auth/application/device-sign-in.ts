@@ -5,6 +5,8 @@ import type { AuthSettings } from './settings.js';
 import { IdentityUnavailableError } from './ports.js';
 import type { Clock, GitHubIdentity, Logger, RandomSource, TicketSigner, TokenStore } from './ports.js';
 import type { DeviceLoginRecord } from '../domain/token.js';
+import { StaticAccessPolicy } from './identity.js';
+import type { AccessPolicy } from './identity.js';
 
 const DEVICE_PURPOSE = 'device-login';
 
@@ -42,7 +44,8 @@ export class DeviceSignIn {
     private readonly random: RandomSource,
     private readonly clock: Clock,
     private readonly logger: Logger,
-    private readonly store: TokenStore
+    private readonly store: TokenStore,
+    private readonly policy: AccessPolicy = new StaticAccessPolicy(settings)
   ) {}
 
   async start(rawReturnTo: string | undefined): Promise<StartResult> {
@@ -150,10 +153,10 @@ export class DeviceSignIn {
             next.outcome = { kind: 'error' };
             break;
           case 'login':
-            if (this.settings.allowedLogins.has(result.login)) {
+            if (this.policy.maySignIn(result.login)) {
               next.outcome = { kind: 'success', login: result.login };
             } else {
-              this.logger.warn('GitHub login not in ALLOWED_GITHUB_LOGINS', { login: result.login });
+              this.logger.warn('GitHub login not allowed (not an admin nor a board member)', { login: result.login });
               next.outcome = { kind: 'not_allowed', login: result.login };
             }
             break;

@@ -61,8 +61,8 @@ RUN addgroup -S -g 1001 pizarra && \
 ENV HOME=/home/pizarra
 WORKDIR /app
 USER pizarra
-# Durable state: auth (token store, generated signing secret, mode 0600) and
-# the canvas in /data/canvas.
+# Durable state: auth (token store, generated signing secret, mode 0600),
+# boards.json, and each board's canvas and files in /data/boards/<id>/.
 VOLUME ["/data"]
 
 COPY --chown=pizarra:pizarra --from=build /app/package.json ./package.json
@@ -83,15 +83,17 @@ LABEL org.opencontainers.image.source="https://github.com/FullFran/pizarra"
 LABEL org.opencontainers.image.description="pizarra: authenticated gateway (OAuth 2.1 + GitHub sign-in) for the mcp-excalidraw-server whiteboard"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# ---- canvas: only the upstream canvas, for gateways that set CANVAS_URL ----
+# ---- canvas: only the pool of upstream canvases, for gateways that set CANVAS_URL ----
 # Copies just the few compiled files the canvas role imports, so this image
 # is byte-identical across gateway-only commits (COPY is cached by content)
 # and a gateway deploy does not recreate the canvas container. Build it with
 # `--target canvas`.
 FROM base AS canvas
 COPY --chown=pizarra:pizarra --from=build /app/dist/canvas-main.js /app/dist/config.js ./dist/
-COPY --chown=pizarra:pizarra --from=build /app/dist/shared/network.js /app/dist/shared/logger.js ./dist/shared/
-COPY --chown=pizarra:pizarra --from=build /app/dist/gateway/infrastructure/upstream-canvas.js /app/dist/gateway/infrastructure/canvas-lock.js /app/dist/gateway/infrastructure/canvas-guardian.js ./dist/gateway/infrastructure/
+COPY --chown=pizarra:pizarra --from=build /app/dist/shared/network.js /app/dist/shared/logger.js /app/dist/shared/locked-json-file.js ./dist/shared/
+COPY --chown=pizarra:pizarra --from=build /app/dist/boards ./dist/boards
+COPY --chown=pizarra:pizarra --from=build /app/dist/gateway/domain/board-path.js /app/dist/gateway/domain/request-policy.js /app/dist/gateway/domain/framing.js /app/dist/gateway/domain/origins.js ./dist/gateway/domain/
+COPY --chown=pizarra:pizarra --from=build /app/dist/gateway/infrastructure/upstream-canvas.js /app/dist/gateway/infrastructure/canvas-lock.js /app/dist/gateway/infrastructure/canvas-guardian.js /app/dist/gateway/infrastructure/canvas-pool.js /app/dist/gateway/infrastructure/pool-server.js /app/dist/gateway/infrastructure/canvas-proxy.js /app/dist/gateway/infrastructure/canvas-runtime.js /app/dist/gateway/infrastructure/legacy-layout.js ./dist/gateway/infrastructure/
 RUN node --check dist/canvas-main.js
 ENV PIZARRA_ROLE=canvas \
     CANVAS_BIND_HOST=0.0.0.0 \

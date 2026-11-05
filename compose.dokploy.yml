@@ -4,8 +4,8 @@
 # for the domain configured in its UI/API, so no ports are published here.
 # No secret is needed: GitHub sign-in uses the device flow (public client ID
 # only) and the session-signing secret is generated on first start inside
-# the data volume (mode 0600). The canvas is kept in the same volume
-# (/data/canvas). See docs/auth.md.
+# the data volume (mode 0600). The boards are kept in the same volume
+# (/data/boards.json, /data/boards/<id>/). See docs/auth.md and docs/multiuser.md.
 #
 # Set in Dokploy's environment (none of them is secret):
 #   PUBLIC_BASE_URL       e.g. https://pizarra.fullfran.com
@@ -23,7 +23,7 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3000"
-      # The unmodified canvas listens here, on 127.0.0.1 inside the container only.
+      # The front of the pool of unmodified board canvases listens here, on 127.0.0.1 inside the container only.
       CANVAS_INTERNAL_PORT: "3100"
       AUTH_MODE: oauth
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}

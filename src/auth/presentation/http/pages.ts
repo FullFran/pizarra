@@ -135,6 +135,7 @@ export interface ConsentView {
   redirectUri: string;
   scope: string;
   login: string;
+  resourceName: string;
   ticket: string;
 }
 
@@ -151,7 +152,8 @@ export function sendConsentPage(res: Response, view: ConsentView): void {
       <dt>Client</dt><dd>${escapeHtml(view.clientName ?? '(unnamed client)')}</dd>
       <dt>Client ID</dt><dd><code>${escapeHtml(view.clientId)}</code></dd>
       <dt>Redirects to</dt><dd><strong>${escapeHtml(redirectHost)}</strong></dd>
-      <dt>Access</dt><dd>${escapeHtml(view.scope)}: read and change every element on the canvas</dd>
+      <dt>Board</dt><dd><strong>${escapeHtml(view.resourceName)}</strong></dd>
+      <dt>Access</dt><dd>${escapeHtml(view.scope)}: read and change every element on this board</dd>
     </dl>
     <p class="note">${escapeHtml(nameNote)} Only approve if you started this connection yourself.</p>
     <form method="post" action="/oauth/authorize">

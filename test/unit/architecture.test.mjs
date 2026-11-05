@@ -1,6 +1,6 @@
 // Dependency rule of the hexagon: domain imports nothing outside its
 // domain (and no Node/Express), application only its domain and ports, and
-// the auth and gateway contexts never import each other (main.ts wires them).
+// the auth, boards and gateway contexts never import each other (main.ts wires them).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -25,7 +25,7 @@ function target(file, specifier) {
   return specifier.startsWith('.') ? relative(src, resolve(dirname(file), specifier)) : specifier;
 }
 
-for (const context of ['auth', 'gateway']) {
+for (const context of ['auth', 'boards', 'gateway']) {
   test(`${context}: domain is pure`, () => {
     for (const file of files(join(src, context, 'domain'))) {
       for (const spec of imports(file)) {
@@ -46,11 +46,14 @@ for (const context of ['auth', 'gateway']) {
   });
 }
 
-test('auth and gateway never import each other', () => {
-  for (const [from, forbidden] of [['auth', 'gateway/'], ['gateway', 'auth/']]) {
+test('auth, boards and gateway never import each other', () => {
+  const contexts = ['auth', 'boards', 'gateway'];
+  for (const from of contexts) {
     for (const file of files(join(src, from))) {
       for (const spec of imports(file)) {
-        assert.ok(!target(file, spec).startsWith(forbidden), `${relative(src, file)} imports ${spec}`);
+        for (const other of contexts.filter(c => c !== from)) {
+          assert.ok(!target(file, spec).startsWith(`${other}/`), `${relative(src, file)} imports ${spec}`);
+        }
       }
     }
   }

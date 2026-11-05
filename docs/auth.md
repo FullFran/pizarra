@@ -1,6 +1,6 @@
 # Authentication
 
-The pizarra gateway protects everything the whiteboard serves — the MCP endpoint (`/mcp`), the canvas page and its assets, the REST API (`/api/*`) and the WebSocket — with OAuth 2.1. You sign in with GitHub, and only the GitHub accounts you list get in. There are no local passwords.
+The pizarra gateway protects everything the whiteboard serves — every board's MCP endpoint (`/b/<id>/mcp`, and `/mcp` for board `main`), its canvas page and assets, its REST API and its WebSocket. How people and agents get in is a plugin: by default you sign in with GitHub (OAuth 2.1 for agents), and only the GitHub accounts you list, and the people they invite to a board, get in; a trusted issuer such as Hagalink Projects can also hand out signed board tickets. There are no local passwords. Boards, roles and invites are described in [docs/multiuser.md](multiuser.md).
 
 ## Topology
 
@@ -30,27 +30,142 @@ On a loopback bind, GitHub or auth variables without `AUTH_MODE=oauth` are ignor
 | Variable | Required when on | Meaning |
 |---|---|---|
 | `AUTH_MODE` | – | `oauth` or `off`. See the table above. |
+| `AUTH_PROVIDERS` | no | Comma-separated auth adapters, in the order they are asked: `github` (default), `trusted-issuer`. See [Auth providers](#auth-providers). |
 | `PUBLIC_BASE_URL` | yes | Public origin, e.g. `https://board.example.com`. Must be `https` (plain `http` only for `127.0.0.1`/`localhost`) and must not have a path. It is the OAuth issuer; the protected resource is `${PUBLIC_BASE_URL}/mcp`. |
-| `GITHUB_CLIENT_ID` | yes | Client ID of your GitHub OAuth app (public; not a secret). |
-| `ALLOWED_GITHUB_LOGINS` | yes | Comma-separated GitHub logins allowed to sign in, case-insensitive, e.g. `FullFran`. **There is no default**: if it is unset the server refuses to start, so nobody gets in by accident. |
-| `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`), with the fork's names and format. It also turns on durable canvas state, in `canvas/` below it (see `CANVAS_DATA_DIR`). |
-| `CANVAS_DATA_DIR` | no | Where the canvas keeps its durable state (upstream's `EXCALIDRAW_DATA_DIR`). Default `$EXCALIDRAW_DATA_DIR/canvas`. The fork kept `canvas-state-v1.json` and `blobs/` at the data directory's root: move them into `canvas/`, or set `CANVAS_DATA_DIR` to the root, to keep a fork-era drawing. |
-| `EXCALIDRAW_EXPORT_DIR` | no | The only directory upstream's MCP file tools may read and write. Default `$EXCALIDRAW_DATA_DIR/files` (upstream's own default is the working directory, i.e. the application). |
+| `GITHUB_CLIENT_ID` | with `github` | Client ID of your GitHub OAuth app (public; not a secret). |
+| `ALLOWED_GITHUB_LOGINS` | with `github` | Comma-separated GitHub logins of the **admins**, case-insensitive, e.g. `FullFran`: they own every GitHub board and create boards. Anyone else gets in only once invited to a board. **There is no default**: if it is unset the server refuses to start, so nobody gets in by accident. |
+| `TRUSTED_ISSUERS` or `TRUSTED_ISSUERS_FILE` | with `trusted-issuer` | JSON array of the issuers whose signed board tickets are accepted. See [Trusted issuers](#trusted-issuers-signed-board-tickets). |
+| `FRAME_ANCESTORS` | no | Origins allowed to embed board pages in an iframe, separated by spaces or commas, e.g. `https://app.hagalink.es`. Exact `https` origins only. Empty (the default): nothing can be framed. See [Embedding boards](#embedding-boards). |
+| `TRUSTED_ISSUER_SESSION_TTL_SECONDS` | no | Lifetime of the board session a browser gets for a ticket. Default `28800` (8 h), 60–86400. |
+| `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`), with the fork's names and format; the boards and their members in `boards.json` (`0600`). It also turns on durable canvas state: each board keeps its canvas in `boards/<id>/canvas/` and its MCP files in `boards/<id>/files/` (see [docs/multiuser.md](multiuser.md); a single-canvas `canvas/` and `files/` are moved to board `main` on the first start). |
+| `CANVAS_DATA_DIR` | no | Board `main`'s canvas directory (upstream's `EXCALIDRAW_DATA_DIR`) instead of `$EXCALIDRAW_DATA_DIR/boards/main/canvas`; nothing is migrated when it is set. The fork kept `canvas-state-v1.json` and `blobs/` at the data directory's root: set `CANVAS_DATA_DIR` to the root to keep a fork-era drawing. |
+| `EXCALIDRAW_EXPORT_DIR` | no | Board `main`'s export directory (the only one its MCP file tools may read and write) instead of `$EXCALIDRAW_DATA_DIR/boards/main/files`. Every other board uses `boards/<id>/files`. |
+| `BOARD_IDLE_SECONDS` | no | A board's canvas process stops after this long without requests or open WebSockets, and starts again on the next one. Default `600`. Board `main` never stops. |
+| `MAX_OPEN_BOARDS` | no | At most this many board canvases run at once, `main` included. Default `8`. Opening another stops the least recently used idle one, or answers `503`. |
 | `GITHUB_APP_NAME` | no | The name you gave the GitHub OAuth app. The sign-in page shows it, so you can check GitHub names the same app. |
 | `AUTH_SECRET` or `AUTH_SECRET_FILE` | no | Signing secret for session cookies, the sign-in binding cookie and consent forms, at least 32 characters. When neither is set, the server generates one (48 random bytes) in `$EXCALIDRAW_DATA_DIR/auth-secret` on first start and reuses it afterwards. An explicit value wins. Changing or deleting it signs everyone out. |
 | `TRUST_PROXY` | behind a proxy | Set it (e.g. `loopback`) when a reverse proxy you control terminates TLS, so rate limits see client IPs. |
 | `AUTH_ACCESS_TOKEN_TTL_SECONDS` | no | Access token lifetime. Default `3600` (1 h), 1–86400. |
 | `AUTH_REFRESH_TOKEN_TTL_SECONDS` | no | Refresh token lifetime. Default 30 days. |
 | `AUTH_SESSION_TTL_SECONDS` | no | Browser session lifetime. Default 7 days. |
-| `CANVAS_INTERNAL_PORT` | no | Loopback port of the upstream canvas inside the gateway's host or container. Default: a free port (`3100` in the image). |
-| `PIZARRA_ROLE` | no | `gateway` (default) or `canvas`. `canvas` runs only the upstream canvas (on `CANVAS_BIND_HOST:CANVAS_INTERNAL_PORT`, with `<data>/canvas`), for gateways in other containers; it has no auth of its own, so reach it only from a private network. |
-| `CANVAS_URL` | no | `http://host:port` of a canvas run with `PIZARRA_ROLE=canvas`. The gateway then spawns no canvas and its `/health` follows that canvas. Several gateways can share one canvas this way. |
+| `CANVAS_INTERNAL_PORT` | no | Loopback port of the canvas pool's front inside the gateway's host or container (each board's canvas gets a free loopback port behind it). Default: a free port (`3100` in the image). |
+| `PIZARRA_ROLE` | no | `gateway` (default) or `canvas`. `canvas` runs only the pool of board canvases (its front on `CANVAS_BIND_HOST:CANVAS_INTERNAL_PORT`, with `<data>/boards/<id>/canvas`), for gateways in other containers; it has no auth of its own, so reach it only from a private network. |
+| `CANVAS_URL` | no | `http://host:port` of a canvas pool run with `PIZARRA_ROLE=canvas`. The gateway then spawns no canvas and its `/health` follows that pool's board `main`. Several gateways can share one pool this way. |
 | `CANVAS_BIND_HOST` | no | Where the `canvas` role listens. Default `0.0.0.0`. |
 | `GITHUB_OAUTH_BASE_URL` / `GITHUB_API_BASE_URL` | no | Override `https://github.com` / `https://api.github.com` (GitHub Enterprise, or a fake GitHub in tests). |
 
 `GITHUB_CLIENT_SECRET` and `GITHUB_CLIENT_SECRET_FILE` are no longer used. If one is still set, the server starts and logs a warning; remove it.
 
 The generated `auth-secret` file is checked on every start: if it is readable by group or others, or shorter than 32 characters, the server refuses to start and says how to fix it (`chmod 600`, or delete it to generate a new one). It is created atomically (written to a temporary `0600` file, then linked into place), so two starts never overwrite each other's secret. Back up the data directory as a whole: losing `auth-secret` only signs browsers out, since tokens are stored separately.
+
+## Auth providers
+
+Each way in is an **auth adapter** (a plugin) behind one port, `IdentityProvider`
+(`src/auth/application/identity.ts`). `AUTH_PROVIDERS` lists the enabled ones, in order; the
+gateway asks each in turn and the first that vouches for the request wins. Nothing else in the
+code knows how a person or agent got in: every adapter answers with the same `Identity`.
+
+| Adapter | Id | People | Agents |
+|---|---|---|---|
+| GitHub (default) | `github` | GitHub device flow → session cookie | OAuth 2.1 tokens from this server, one board's resource each |
+| Trusted issuer | `trusted-issuer` | `GET /b/<id>/enter?ticket=…` → session cookie for that board | `Authorization: Bearer <ticket>` on `/b/<id>/mcp` |
+
+Examples: `AUTH_PROVIDERS=github` (pizarra.fullfran.com, unchanged); `AUTH_PROVIDERS=trusted-issuer`
+(an instance only reachable from Hagalink Projects: no GitHub app, no `ALLOWED_GITHUB_LOGINS`);
+`AUTH_PROVIDERS=github,trusted-issuer` (both). Each adapter checks its own variables at startup and
+names the missing ones.
+
+### Trusted issuers (signed board tickets)
+
+An application that already knows who its users are (Hagalink Projects) signs a short **board
+ticket** for one person, one board and one role, with its own private key. pizarra only holds the
+public keys, never a shared secret, and never sees the application's own session token.
+
+```bash
+AUTH_PROVIDERS=trusted-issuer
+TRUSTED_ISSUERS='[
+  {"issuer": "https://app.hagalink.es", "alg": "EdDSA", "jwks_url": "https://app.hagalink.es/.well-known/pizarra-jwks.json"},
+  {"issuer": "https://other.example", "alg": "ES256", "keys": [{"kty": "EC", "crv": "P-256", "x": "…", "y": "…", "kid": "2026-11"}]}
+]'
+```
+
+| Field | Meaning |
+|---|---|
+| `issuer` | The ticket's `iss`, exactly. |
+| `alg` | `EdDSA` (Ed25519) or `ES256` (P-256). Anything else, `HS256` and every `HS*` above all, refuses to start; a ticket signed with any other algorithm than its issuer's is rejected, even if it is otherwise valid. |
+| `jwks_url` | Where the issuer publishes its public keys (RFC 7517 JWKS). `https` (plain `http` only on loopback); no redirects, 64 KiB, 5 s. Read at startup, every 10 minutes, and when a ticket names a `kid` not seen yet (at most every 30 s), so keys can rotate. |
+| `keys` | Instead of `jwks_url`: the public JWKs, pinned (for an issuer reachable only on a private network). A private key (`d`) refuses to start. |
+
+The ticket is a compact JWS (a JWT) with these claims:
+
+| Claim | Rule |
+|---|---|
+| `iss` | A configured issuer. |
+| `aud` | This pizarra's `PUBLIC_BASE_URL` (a string, or an array containing it). |
+| `sub` | Opaque, stable id of the person in the issuer (at most 256 characters). |
+| `name` | Optional display name. |
+| `board` | The board id (`[a-z0-9][a-z0-9-]{0,62}`). |
+| `role` | `editor` or `viewer`. |
+| `jti` | Unique id of the ticket. |
+| `exp` | At most 5 minutes ahead (30 s of clock skew tolerated); with `iat`, `exp - iat` at most 300. `nbf` is honoured. |
+
+- **Browser:** open (or frame) `https://pizarra.example/b/<board>/enter?ticket=<jws>` (add `&embed=1`
+  for the embedded view). A valid ticket is used **once** (decided in the shared store, so across
+  gateways only one entry wins), sets an `HttpOnly`, `SameSite=Lax` session cookie for that board
+  only (`__Host-wb_b_<board>`), and redirects to `/b/<board>/`. The redirect sends no `Referer`, and
+  the ticket is never logged. A rejected ticket (bad signature, wrong `aud`, expired, reused, for
+  another board, `HS256`, unknown issuer) ends on an error page and sets nothing.
+- **Agents:** send the ticket as `Authorization: Bearer <jws>` to `/b/<board>/mcp` (also the board's
+  REST API and WebSocket). It is not single use for agents, but it expires within five minutes and
+  opens only its board; the issuer hands its agent a fresh one as needed. `viewer` tickets may call
+  only the read-only MCP tools.
+- **Boards:** the first valid ticket for a board id that does not exist creates it, owned by that
+  issuer. From then on only that issuer's tickets open it: never another issuer's, never a GitHub
+  account (admins included), and a ticket never opens a GitHub board or `main`. Issuer boards have
+  no invites: the issuer decides who gets a ticket.
+
+### Embedding boards
+
+An application can show a board inside its own page (Hagalink Projects shows each project's board).
+
+- `FRAME_ANCESTORS=https://app.hagalink.es` lets exactly the listed origins frame **board pages**
+  (`/b/<id>/`, and `/` for board main): they are sent with
+  `Content-Security-Policy: frame-ancestors https://app.hagalink.es` and no `X-Frame-Options`.
+  An origin that is not listed cannot frame them.
+- Everything else refuses framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`): the sign-in,
+  device-code and consent pages **always**, even from a listed origin, so nobody can trick a
+  person into approving access inside someone else's page. With `FRAME_ANCESTORS` empty every page
+  refuses framing, as before.
+- `?embed=1` (`/b/<id>/?embed=1`, or `/b/<id>/enter?ticket=…&embed=1`) hides pizarra's own chrome
+  (the badge with the board name and the sign-out button) for the embedded view.
+- **Same-site requirement.** Cookies stay `SameSite=Lax`, so a framed board only gets its session
+  cookie when the embedding page is **same-site** with pizarra: serve pizarra under the embedder's
+  registrable domain (for `https://app.hagalink.es`, run it at `https://pizarra.hagalink.es`). No
+  third-party cookies are needed, and none are used. A cross-site embedder (another registrable
+  domain) would frame a board that cannot sign in.
+
+### Writing an auth adapter
+
+Letting another organisation's people in (an OIDC provider, another company's tickets) is one new
+adapter, without touching the gateway, the boards or the other adapters:
+
+1. Write `src/auth/plugins/<id>.ts` exporting an `AuthPluginDefinition` (`src/auth/plugins/types.ts`):
+   - `id`: the name used in `AUTH_PROVIDERS`.
+   - `missing(env)`: the required variables that are unset (reported with the core ones).
+   - `configure(env, { issuer, dataDir })`: read and validate its variables; throw `AuthConfigError` on a bad value.
+   - `build(context, config)`: return `{ provider, router?, challenge?, warmUp? }`. `context` gives the
+     shared signer (signed and sealed cookies), the shared store (`claimOnce` for single use), the cookie
+     jar, the clock, the logger, the boards' `admission` and the access `policy`.
+2. Its `provider` implements `IdentityProvider`: `bearer(token, target)` and/or
+   `session(cookies, target)` answer `none` (not my kind of credential), `invalid`, or `ok` with an
+   `Identity`. Checks are synchronous; `prepare(bearer)` may fetch keys first. `target.board` is the
+   board the request is for: a board-scoped credential must refuse any other.
+3. The `Identity` decides what the boards see: with `issuer` and `role` set, it is treated like a
+   trusted issuer's ticket (its own issuer-owned boards, created through `context.admission`);
+   `provider: 'github'` identities are GitHub logins (admins and members).
+   Any identity with an `issuer` is treated as a trusted issuer, so a new adapter must use an `issuer`
+   string unique to it (never another adapter's issuer id), or its people would open that issuer's boards.
+4. Add one line to `src/auth/plugins/registry.ts`, and a wire check like `scripts/check-tickets.mjs`.
 
 ## Create the GitHub OAuth app
 
@@ -94,7 +209,7 @@ If the code expires (GitHub's `expires_in`, at most 15 minutes), you cancel on G
 
 | Surface | Without credentials | Accepted credentials |
 |---|---|---|
-| `/mcp` | `401` with `WWW-Authenticate: Bearer resource_metadata="${PUBLIC_BASE_URL}/.well-known/oauth-protected-resource", scope="whiteboard"` | `Authorization: Bearer <access token>` for resource `${PUBLIC_BASE_URL}/mcp` with scope `whiteboard` |
+| `/mcp`, `/b/<id>/mcp` | `401` with `WWW-Authenticate: Bearer resource_metadata="${PUBLIC_BASE_URL}/.well-known/oauth-protected-resource", scope="whiteboard"` (for `/b/<id>/mcp`: `…/oauth-protected-resource/b/<id>/mcp`) | `Authorization: Bearer <access token>` for that board's resource with scope `whiteboard` (or a trusted issuer's ticket for the board, below) |
 | canvas page, static files | `302` to `/oauth/login` | session cookie |
 | `/api/*` | `401` | session cookie, or a bearer access token. Writes with the cookie must come from `PUBLIC_BASE_URL` (`Origin`, or `Referer` when there is no `Origin`), otherwise `403`. |
 | WebSocket | `401` | bearer access token, or the session cookie with `Origin` equal to `PUBLIC_BASE_URL` (any other Origin: `403`) |
@@ -113,13 +228,15 @@ Path matching is case-insensitive (`/API/elements` is `/api/…`), as Express ro
 | `/oauth/token` | `authorization_code` and `refresh_token` grants |
 | `/oauth/login` | Sign-in page (`GET`); `POST` from the same origin starts a GitHub device login |
 | `/oauth/device`, `/oauth/device/poll`, `/oauth/device.js` | The code page, its same-origin status check, and the script that polls it |
-| `/oauth/logout` | `POST` from the same origin clears the session cookie |
+| `/oauth/logout` | `POST` from the same origin clears every session cookie (GitHub and board tickets) |
+| `/b/<id>/enter` | Trusted issuers: trades a signed board ticket for that board's session cookie (`trusted-issuer`) |
+| `/boards`, `/b/<id>/members[/<login>]` | Boards API: list and create boards, invite and remove members ([docs/multiuser.md](multiuser.md)) |
 
 Protocol details:
 
 - **PKCE** is mandatory and only `S256` is accepted; `plain` or a missing challenge is rejected with `invalid_request`.
 - **RFC 9207:** every authorization response, success or error, carries `iss=${PUBLIC_BASE_URL}`.
-- **RFC 8707:** `resource` is optional; when given it must be `${PUBLIC_BASE_URL}/mcp` (`invalid_target` otherwise). Every token is bound to that resource and checked on every request.
+- **RFC 8707:** every board is its own protected resource, `${PUBLIC_BASE_URL}/b/<id>/mcp`, and `${PUBLIC_BASE_URL}/mcp` is board `main`'s. `resource` is optional (it then means `/mcp`); when given it must be one of a GitHub board's resources (`invalid_target` otherwise), and the signed-in account must be able to open that board. Every token is bound to its resource and checked on every request: a token for one board never opens another. Its metadata is at `/.well-known/oauth-protected-resource/b/<id>/mcp`.
 - **Codes** live 60 s, are single use, and are burnt on the first presentation whatever the outcome. Presenting a used code again revokes the tokens it produced.
 - **Refresh tokens rotate.** Each one works once; reusing an old one revokes its whole family (every access and refresh token descending from the same authorization code).
 - **Clients** are either a Client ID Metadata Document URL (the 2025-11-25 / 2026-07-28 way; `client_id` is an `https` URL with a path whose JSON document lists `redirect_uris`) or a client registered through `/oauth/register`. Metadata documents are fetched only over `https`, only from public IP addresses (loopback, private, link-local, CGNAT, multicast and IPv4-mapped forms are refused, and the connection is pinned to the checked address), without redirects, within 5 s and 64 KiB, and cached for its `Cache-Control: max-age` between 1 minute and 24 hours. Only public clients (`token_endpoint_auth_method: "none"`) are accepted from a document.
@@ -176,9 +293,11 @@ Defended against:
 - **Leaked refresh tokens:** rotation with family revocation on reuse; short-lived access tokens.
 - **Token confusion:** tokens are bound to `${PUBLIC_BASE_URL}/mcp` and refused anywhere else; RFC 9207 `iss` lets clients detect mix-up attacks.
 - **CSRF and cross-site WebSocket hijacking:** `SameSite=Lax` session cookie, an `Origin` check on every cookie-authenticated write whatever its path (paths are matched case-insensitively, as Express routes them, so `/API/…` gets the same rules as `/api/…`), on the consent form, the device login and the WebSocket; single-use consent tickets bound to the session.
-- **Clickjacking of the consent page:** `X-Frame-Options: DENY` and `frame-ancestors 'none'`.
+- **Clickjacking of the consent page:** `X-Frame-Options: DENY` and `frame-ancestors 'none'` on every sign-in and consent page, whatever `FRAME_ANCESTORS` says; only board pages can be framed, and only by the listed origins.
 - **SSRF through client metadata URLs:** https only, public addresses only, pinned connection, no redirects, size and time limits.
 - **Store disclosure:** the store holds only hashes; a copy of it does not grant access.
+- **Board tickets:** asymmetric signatures only (EdDSA, ES256; `HS*` and `none` always refused), the issuer's configured algorithm only, audience-bound to this pizarra, five-minute lifetime, single use in browsers (`claimOnce` in the shared store), one board each, never logged. A compromised issuer key opens only that issuer's boards.
+- **Cross-board access:** every token, ticket and board cookie opens one board (or, for GitHub sessions, the boards the account is a member of); a board you cannot open answers `404`, like one that does not exist.
 
 Assumptions:
 
@@ -189,7 +308,7 @@ Assumptions:
 
 Out of scope:
 
-- Users or roles beyond the allowlist: every allowed login has full access to the canvas.
+- Link invites (anyone holding a link could join): invites are by GitHub login only (docs/multiuser.md, decisions).
 - Revoking one client from a UI. To revoke everything, stop the server and delete `auth-store.json`; to sign every browser out, change `AUTH_SECRET` or delete the generated `auth-secret`; to drop a person, remove their login from `ALLOWED_GITHUB_LOGINS` and restart (their sessions and tokens stop working).
 - Token introspection and revocation endpoints (RFC 7662 / 7009), `private_key_jwt` clients, OpenID Connect.
 - Rate limiting shared across processes, and protection against volumetric denial of service (use the proxy). In particular, someone who can reach the server from 4 or more IPs can fill the 20 pending device logins and delay sign-ins for up to 15 minutes (restarting the server clears them; existing sessions and tokens keep working).

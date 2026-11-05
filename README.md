@@ -2,9 +2,10 @@
 
 A shared handwriting whiteboard for humans and agents. pizarra is an authenticated gateway in front of the unmodified [`mcp-excalidraw-server`](https://github.com/yctimlin/mcp_excalidraw) (pinned to an upstream commit, see [Upstream pin](#upstream-pin)): you draw on the Excalidraw canvas in a browser, and agents (ChatGPT, Claude Code, Codex, …) read and draw on the same board through MCP.
 
-- `/mcp`: upstream's MCP tools over Streamable HTTP, for 2026-07-28 and 2025-era clients.
+- Several boards (`/b/<id>/`), each its own upstream canvas process, started on first use and stopped when idle; `/` and `/mcp` are board `main`, today's canvas. Editors and viewers per board, invited by GitHub login ([docs/multiuser.md](docs/multiuser.md)).
+- `/b/<id>/mcp` (and `/mcp`): upstream's MCP tools over Streamable HTTP, for 2026-07-28 and 2025-era clients, one board per endpoint.
 - OAuth 2.1 authorization server: PKCE S256, RFC 9207 `iss`, RFC 8707 `resource`, RFC 9728/8414 metadata, rotating refresh tokens, Client ID Metadata Documents and Dynamic Client Registration.
-- GitHub sign-in with the device flow: no client secret and no signing secret to configure. Only the logins in `ALLOWED_GITHUB_LOGINS` get in.
+- Pluggable sign-in (`AUTH_PROVIDERS`): GitHub with the device flow by default (no client secret and no signing secret to configure; the logins in `ALLOWED_GITHUB_LOGINS` are the admins, anyone else needs an invite), and signed board tickets from trusted issuers such as Hagalink Projects. Boards can be embedded by listed origins (`FRAME_ANCESTORS`).
 - The canvas UI, REST API and WebSocket are reachable only through the gateway, with a session or a bearer token.
 
 ## Architecture
@@ -14,10 +15,12 @@ flowchart LR
   browser[Browser] -- "session cookie" --> gw
   agent[MCP client] -- "Bearer token" --> gw
   subgraph container
-    gw["gateway :3000<br/>OAuth, /mcp, auth gate, proxy"]
-    canvas["mcp-excalidraw-server<br/>127.0.0.1:3100 (unmodified)"]
-    gw -- "UI, /api, WebSocket (after auth)" --> canvas
-    gw -- "MCP tools (in-process)" --> canvas
+    gw["gateway :3000<br/>auth plugins, boards, /b/&lt;id&gt;/mcp, proxy"]
+    pool["canvas pool front<br/>127.0.0.1:3100"]
+    canvas["mcp-excalidraw-server per open board<br/>127.0.0.1:free port (unmodified)"]
+    gw -- "UI, /api, WebSocket (after auth)" --> pool
+    gw -- "MCP tools (in-process, one instance per board)" --> pool
+    pool -- "/b/&lt;id&gt;/... to its board" --> canvas
   end
   gw -- "device flow" --> github[GitHub]
 ```
@@ -26,9 +29,10 @@ The code is hexagonal, with dependencies pointing inwards (checked by `test/unit
 
 | Path | What lives there |
 |---|---|
-| `src/auth/` | The auth bounded context: `domain` (pure rules: redirect URIs, return path, PKCE, resources, scopes, allowlist, rate limits), `application` (use cases behind ports: sign-in, authorize, tokens, clients, sessions), `infrastructure` (JSON token store, SSRF-safe fetch, GitHub device flow, signing secret, env config), `presentation/http` (OAuth routes, pages, the request authenticator). It imports nothing from the gateway. |
-| `src/gateway/` | The board gateway: `domain` (CSRF and path rules), `application` (the access gate, ports for the authenticator and the canvas), `infrastructure` (upstream supervisor, reverse proxy, upstream MCP loader), `presentation/http` (Express app, `/mcp`). It imports nothing from auth. |
-| `src/main.ts` | Composition root: reads config, starts the canvas, wires auth into the gateway. |
+| `src/auth/` | The auth bounded context: `domain` (pure rules: redirect URIs, return path, PKCE, resources, scopes, allowlist, rate limits, ticket claims), `application` (the `IdentityProvider` port and use cases behind ports: sign-in, authorize, tokens, clients, sessions, tickets), `infrastructure` (JSON token store, SSRF-safe fetch, GitHub device flow, issuer keys, signing secret, env config), `presentation/http` (OAuth and ticket routes, pages, the request authenticator), `plugins` (one file per auth adapter: `github`, `trusted-issuer`). It imports nothing from the gateway or the boards. |
+| `src/boards/` | The boards bounded context: `domain` (board ids, owners, roles, who opens what), `application` (create, invite, admit an issuer's board), `infrastructure` (`boards.json`). |
+| `src/gateway/` | The board gateway: `domain` (board paths, CSRF, viewer and framing rules), `application` (the access gate, ports for the authenticator, the boards and the canvas), `infrastructure` (canvas pool and its front, upstream supervisor, reverse proxy, per-board upstream MCP, viewer WebSocket filter), `presentation/http` (Express app, MCP, boards API). It imports nothing from auth or boards. |
+| `src/composition.ts`, `src/main.ts`, `src/canvas-main.ts` | Composition roots: read config, open the boards, start the canvas pool, wire auth and boards into the gateway. |
 
 ## Run locally
 
@@ -60,7 +64,7 @@ docker run -p 3000:3000 -v pizarra-data:/data \
 
 For Dokploy, use [`compose.dokploy.yml`](compose.dokploy.yml) and set `PUBLIC_BASE_URL`, `GITHUB_CLIENT_ID` and `ALLOWED_GITHUB_LOGINS` in its environment; none of them is secret. TLS is terminated by the proxy in front.
 
-Everything durable lives in the `/data` volume: tokens, registered clients and the signing secret at its root, the canvas (elements, files, snapshots) in `/data/canvas`, and files written by the MCP file tools in `/data/files`. The canvas survives restarts of the canvas process, of the gateway and of the container.
+Everything durable lives in the `/data` volume: tokens, registered clients, the signing secret and `boards.json` at its root, and each board's canvas (elements, files, snapshots) in `/data/boards/<id>/canvas` with the files written by its MCP file tools in `/data/boards/<id>/files`. A single-canvas volume (`/data/canvas`, `/data/files`) becomes board `main` on the first start. Boards survive restarts of their canvas process, of the gateway and of the container.
 
 ## Upstream pin
 

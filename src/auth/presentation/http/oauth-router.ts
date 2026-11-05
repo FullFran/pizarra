@@ -10,6 +10,7 @@ import type { DeviceSignIn } from '../../application/device-sign-in.js';
 import type { SessionService } from '../../application/sessions.js';
 import type { AuthSettings } from '../../application/settings.js';
 import type { TokenService } from '../../application/tokens.js';
+import type { AccessPolicy } from '../../application/identity.js';
 import { CookieJar, isSameOrigin, oauthError, rateLimit, single } from './http-helpers.js';
 import { sendConsentPage, sendDevicePage, sendDeviceScript, sendErrorPage, sendLoginPage } from './pages.js';
 
@@ -21,6 +22,7 @@ export interface OAuthRouterDeps {
   deviceSignIn: DeviceSignIn;
   authorization: AuthorizationService;
   tokens: TokenService;
+  policy: AccessPolicy;
   appName?: string;
   resourceName: string;
 }
@@ -93,6 +95,23 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
     const byPath = `/.well-known/oauth-protected-resource${new URL(resource).pathname}`;
     if (byPath !== path) router.get(byPath, document);
   }
+  // Resources that come and go (one per board): `/.well-known/oauth-protected-resource/b/<id>/mcp`.
+  router.get(/^\/\.well-known\/oauth-protected-resource(\/[A-Za-z0-9/_-]+)$/, (req, res) => {
+    const resource = `${issuer}${(req.params as Record<string, string>)[0]}`;
+    if (!deps.policy.describeResource(resource)) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(404).json({ error: 'not_found', error_description: 'no such protected resource' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.json({
+      resource,
+      authorization_servers: [issuer],
+      scopes_supported: [WHITEBOARD_SCOPE],
+      bearer_methods_supported: ['header'],
+      resource_name: `${deps.resourceName}: ${deps.policy.describeResource(resource)!.name}`
+    });
+  });
 
   router.get('/.well-known/oauth-authorization-server', (_req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=300');
@@ -200,12 +219,6 @@ export function createOAuthRouter(deps: OAuthRouterDeps): express.Router {
     } catch (error) {
       next(error);
     }
-  });
-
-  router.post('/oauth/logout', urlencoded, (req, res) => {
-    if (!isSameOrigin(req.headers, issuer)) return sendErrorPage(res, 403, 'Forbidden', 'Cross-site request rejected.');
-    cookies.clear(res, cookies.session);
-    res.redirect(303, '/');
   });
 
   // ---- Authorization endpoint ----

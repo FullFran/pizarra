@@ -1,35 +1,29 @@
 /**
- * Composition root: reads configuration, starts the upstream canvas on
- * loopback (or connects to one at CANVAS_URL), wires the auth module into the
- * gateway and listens. With PIZARRA_ROLE=canvas it only runs the canvas, for
- * gateways in other containers.
+ * Composition root: reads configuration, opens the boards, starts the pool
+ * of board canvases on loopback (or connects to one at CANVAS_URL), wires
+ * the auth plugins and the boards into the gateway and listens. With
+ * PIZARRA_ROLE=canvas it only runs the canvas pool, for gateways in other
+ * containers.
  */
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
-import net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
+import { MAIN_BOARD, buildBoards } from './boards/index.js';
+import { boardDirectory, boardsAccessPolicy } from './composition.js';
 import { resolveGatewayConfig } from './config.js';
 import { CanvasProxy } from './gateway/infrastructure/canvas-proxy.js';
+import { createCanvasRuntime } from './gateway/infrastructure/canvas-runtime.js';
+import { migrateToBoardMain } from './gateway/infrastructure/legacy-layout.js';
 import { RemoteCanvas } from './gateway/infrastructure/remote-canvas.js';
-import { UpstreamCanvasSupervisor } from './gateway/infrastructure/upstream-canvas.js';
-import { loadUpstreamMcpFactory } from './gateway/infrastructure/upstream-mcp.js';
+import { BoardMcpFactories } from './gateway/infrastructure/upstream-mcp.js';
 import { MCP_HTTP_PATH } from './gateway/presentation/http/mcp-route.js';
 import { createGatewayApp } from './gateway/presentation/http/app.js';
+import { framingHeaders } from './gateway/domain/framing.js';
 import { createLogger } from './shared/logger.js';
 
 const logger = createLogger();
-
-function freeLoopbackPort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const address = probe.address();
-      const port = typeof address === 'object' && address ? address.port : 0;
-      probe.close(() => resolve(port));
-    });
-  });
-}
 
 function formatHost(host: string): string {
   return host.includes(':') ? `[${host}]` : host;
@@ -51,31 +45,74 @@ async function main(): Promise<void> {
   if (authConfig.mode === 'oauth') {
     for (const warning of authConfig.warnings) logger.warn(warning);
   } else if (authConfig.insecure) {
-    logger.warn(`Authentication is OFF on non-loopback HOST=${config.host} (ALLOW_INSECURE_NO_AUTH=true): anyone who can reach this address can read and change the canvas.`);
+    logger.warn(`Authentication is OFF on non-loopback HOST=${config.host} (ALLOW_INSECURE_NO_AUTH=true): anyone who can reach this address can read and change every board.`);
   }
-  const auth = authConfig.mode === 'oauth' ? buildAuth(authConfig, { logger }) : undefined;
+
+  if (config.dataDir) mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+  const boards = buildBoards({
+    ...(config.dataDir ? { dataDir: config.dataDir } : {}),
+    admins: authConfig.mode === 'oauth' ? authConfig.settings.allowedLogins : { has: () => false }
+  });
+  boards.ensureMain();
+  const auth = authConfig.mode === 'oauth'
+    ? buildAuth(authConfig, { logger, policy: boardsAccessPolicy(boards, authConfig.settings.issuer), admission: boards })
+    : undefined;
 
   const upstream = config.canvasUrl
     ? new RemoteCanvas({ url: config.canvasUrl, logger })
-    : new UpstreamCanvasSupervisor({
-      port: config.canvasPort || await freeLoopbackPort(),
+    : createCanvasRuntime({
       logger,
-      ...(config.canvasDataDir ? { dataDir: config.canvasDataDir } : {})
+      boardExists: board => boards.exists(board),
+      ...(config.dataDir ? { dataDir: config.dataDir } : {}),
+      ...(config.canvasDataDir ? { mainDataDir: config.canvasDataDir } : {}),
+      idleSeconds: config.boardIdleSeconds,
+      maxOpen: config.maxOpenBoards,
+      host: '127.0.0.1',
+      port: config.canvasPort
     });
   process.on('exit', () => upstream.killNow());
   await upstream.start();
-  if (config.exportDir) mkdirSync(config.exportDir, { recursive: true, mode: 0o700 });
-  const mcpFactory = await loadUpstreamMcpFactory(upstream.baseUrl, config.exportDir ? { exportDir: config.exportDir } : {});
+  await auth?.warmUp();
+
+  // MCP file tools: each board has its own export directory.
+  if (config.dataDir && !config.exportDir) migrateToBoardMain(config.dataDir, 'files', logger);
+  // Without a data directory nothing is durable: boards' files go to a temporary directory, removed on exit.
+  let scratchRoot: string | undefined;
+  const exportDirOf = (board: string): string => {
+    if (board === MAIN_BOARD && config.exportDir) return config.exportDir;
+    if (config.dataDir) return join(config.dataDir, 'boards', board, 'files');
+    if (!scratchRoot) {
+      scratchRoot = mkdtempSync(join(tmpdir(), 'pizarra-files-'));
+      process.on('exit', () => rmSync(scratchRoot!, { recursive: true, force: true }));
+    }
+    return join(scratchRoot, board);
+  };
+  const mcp = new BoardMcpFactories({ canvasBaseUrl: upstream.baseUrl, exportDirOf });
 
   const { app, onUpgrade } = createGatewayApp({
     bindHost: config.host,
     ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
     trustProxy: config.trustProxy,
-    ...(auth ? { auth: { router: auth.router, authenticator: auth.authenticator, resource: auth.settings.resources[0]! } } : {}),
-    mcpFactory,
+    ...(auth ? {
+      auth: {
+        router: auth.router,
+        authenticator: auth.authenticator,
+        resource: auth.settings.resources[0]!,
+        ...(auth.providers.includes('github') ? { signInPath: '/oauth/login' } : {})
+      }
+    } : {}),
+    mcpFactoryFor: board => mcp.get(board),
+    boards: boardDirectory(boards),
     upstream,
     proxy: new CanvasProxy(upstream, logger),
-    logger
+    logger,
+    framing: (headers, kind) => {
+      const upstreamCsp = headers['content-security-policy'];
+      const policy = framingHeaders(kind, config.frameAncestors, typeof upstreamCsp === 'string' ? upstreamCsp : undefined);
+      headers['content-security-policy'] = policy.csp;
+      if (policy.xFrameOptions) headers['x-frame-options'] = policy.xFrameOptions;
+      else delete headers['x-frame-options'];
+    }
   });
   const server = createServer(app);
   server.on('upgrade', onUpgrade);
@@ -100,8 +137,8 @@ async function main(): Promise<void> {
   logger.info('pizarra gateway listening', {
     url: local,
     mcp: `${config.publicBaseUrl ?? local}${MCP_HTTP_PATH}`,
-    canvasState: config.canvasUrl ? `shared canvas at ${upstream.baseUrl}` : config.canvasDataDir ?? 'in memory (set EXCALIDRAW_DATA_DIR to keep it)',
-    auth: auth ? `oauth (issuer ${auth.settings.issuer}, ${auth.settings.allowedLogins.size} allowed login(s))` : 'off'
+    canvasState: config.canvasUrl ? `shared canvas pool at ${upstream.baseUrl}` : config.dataDir ?? 'in memory (set EXCALIDRAW_DATA_DIR to keep it)',
+    auth: auth ? `${auth.providers.join(', ')} (issuer ${auth.settings.issuer}, ${auth.settings.allowedLogins.size} admin(s))` : 'off'
   });
 }
 
