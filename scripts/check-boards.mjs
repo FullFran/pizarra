@@ -211,11 +211,94 @@ async function checkMigrationAndAuth() {
   }
 }
 
+async function checkInvitesAndViewers() {
+  const github = await startFakeGitHub();
+  const dataDir = join(scratch, 'invites');
+  const port = await freePort();
+  const gateway = await startGateway(scratch, githubEnv(port, github.url, dataDir, { PORT: String(port) }));
+  const { base } = gateway;
+  try {
+    const admin = await githubLogin(base, github, 'FullFran');
+    const adminCookie = { cookie: cookieHeader(admin.jar), origin: base };
+    for (const id of ['alpha', 'beta']) await request(base, { method: 'POST', path: '/boards', headers: adminCookie, json: { id } });
+    const before = await githubLogin(base, github, 'alice');
+    assertEqual(before.poll.body?.reason, 'not_allowed', 'an account that is no admin nor member cannot sign in');
+
+    // Owners (admins) invite GitHub logins as editors or viewers.
+    assertEqual((await request(base, { method: 'PUT', path: '/b/alpha/members/alice', headers: { cookie: adminCookie.cookie }, json: { role: 'editor' } })).status, 403, 'an invite with the cookie needs our Origin');
+    assertEqual((await request(base, { method: 'PUT', path: '/b/alpha/members/alice', headers: adminCookie, json: { role: 'owner' } })).status, 400, 'owner is not an invitable role');
+    assertEqual((await request(base, { method: 'PUT', path: '/b/alpha/members/alice', headers: adminCookie, json: { role: 'editor' } })).status, 200, 'invite alice as editor');
+    const invited = await request(base, { method: 'PUT', path: '/b/alpha/members/Bob', headers: adminCookie, json: { role: 'viewer' } });
+    assertEqual(JSON.stringify(invited.body.members), '[{"login":"alice","role":"editor"},{"login":"bob","role":"viewer"}]', 'members after the invites');
+    const stored = JSON.parse(readFileSync(join(dataDir, 'boards.json'), 'utf8')).boards.alpha.members;
+    assertEqual(JSON.stringify(stored), '{"alice":"editor","bob":"viewer"}', 'memberships are written to boards.json');
+
+    // An editor: signs in now, sees only alpha, draws on it, cannot invite or create boards.
+    const alice = await githubLogin(base, github, 'alice');
+    assert(alice.jar, `an invited login signs in (${alice.poll.text})`);
+    const aliceCookie = { cookie: cookieHeader(alice.jar), origin: base };
+    assertEqual(JSON.stringify((await request(base, { path: '/boards', headers: aliceCookie })).body.boards.map(b => [b.id, b.role])), '[["alpha","editor"]]', 'an editor lists only its boards');
+    assertEqual((await request(base, { path: '/b/alpha/', headers: aliceCookie })).status, 200, 'an editor opens its board page');
+    assertEqual((await request(base, { method: 'POST', path: '/b/alpha/api/elements', headers: aliceCookie, json: element('by-alice') })).status, 200, 'an editor writes');
+    assertEqual((await request(base, { path: '/b/beta/api/elements', headers: aliceCookie })).status, 404, 'a board you are not on is a 404');
+    assertEqual((await request(base, { path: '/api/elements', headers: aliceCookie })).status, 404, 'main (unprefixed) is not open to a member of another board');
+    assertEqual((await request(base, { method: 'PUT', path: '/b/alpha/members/carol', headers: aliceCookie, json: { role: 'editor' } })).status, 403, 'an editor cannot invite');
+    assertEqual((await request(base, { method: 'POST', path: '/boards', headers: aliceCookie, json: { id: 'mine' } })).status, 403, 'only admins create boards');
+
+    // A viewer: reads, never writes (REST, WebSocket data frames, MCP tools).
+    const bob = await githubLogin(base, github, 'bob');
+    const bobCookie = { cookie: cookieHeader(bob.jar), origin: base };
+    assertEqual(JSON.stringify(await elementIds(base, '/b/alpha', bobCookie)), '["by-alice"]', 'a viewer reads the board');
+    for (const [method, path, json] of [['POST', '/b/alpha/api/elements', element('by-bob')], ['PUT', '/b/alpha/api/elements/by-alice', { width: 1 }], ['DELETE', '/b/alpha/api/elements/clear', undefined], ['POST', '/b/alpha/api/elements/sync', { elements: [] }]]) {
+      const refused = await request(base, { method, path, headers: bobCookie, json });
+      assertEqual(refused.status, 403, `a viewer cannot ${method} ${path}`);
+    }
+    const viewerSocket = await wsOpen(`ws://127.0.0.1:${port}/b/alpha/`, bobCookie, { keep: true });
+    assert(viewerSocket.ok, `a viewer opens the WebSocket (${viewerSocket.status})`);
+    const afterFrames = await new Promise(resolve => {
+      const socket = viewerSocket.socket;
+      const seen = [];
+      socket.on('message', data => seen.push(JSON.parse(String(data))));
+      socket.send(JSON.stringify({ type: 'elements_batch_created', elements: [element('ws-injected')] }));
+      socket.send(Buffer.from('binary frame'));
+      socket.ping();
+      socket.once('pong', async () => {
+        await request(base, { method: 'POST', path: '/b/alpha/api/elements', headers: aliceCookie, json: element('after-viewer-frames') });
+        await sleep(500);
+        socket.close();
+        resolve({ open: true, seen });
+      });
+      setTimeout(() => resolve({ open: false, seen }), 5000);
+    });
+    assert(afterFrames.open, 'control frames (ping/pong) pass for a viewer');
+    assert(afterFrames.seen.some(m => JSON.stringify(m).includes('after-viewer-frames')), 'the viewer keeps receiving live updates after sending data frames');
+    assertEqual(JSON.stringify(await elementIds(base, '/b/alpha', bobCookie)), '["after-viewer-frames","by-alice"]', 'nothing a viewer sent changed the board');
+    const bobToken = await obtainToken(base, bob.jar, `${base}/b/alpha/mcp`);
+    const bobBearer = { authorization: `Bearer ${bobToken.accessToken}` };
+    const write = await mcpCall(base, '/b/alpha/mcp', 'create_element', element('by-bob-mcp'), bobBearer);
+    assertEqual(write.status, 403, `a viewer's agent cannot call create_element (${write.text.slice(0, 200)})`);
+    assert(/read-only/.test(write.body?.error?.message ?? ''), 'the refusal says the board is read-only');
+    const read = await mcpCall(base, '/b/alpha/mcp', 'query_elements', {}, bobBearer);
+    assert(read.result?.result && read.text.includes('by-alice'), `a viewer's agent reads (${read.text.slice(0, 200)})`);
+    assertEqual((await request(base, { path: '/b/alpha/api/elements/by-bob-mcp', headers: bobCookie })).status, 404, 'the refused MCP write did not happen');
+
+    // Removing a member ends their access at once (sessions and tokens).
+    assertEqual((await request(base, { method: 'DELETE', path: '/b/alpha/members/bob', headers: adminCookie })).status, 200, 'remove bob');
+    assertEqual((await request(base, { path: '/b/alpha/api/elements', headers: bobCookie })).status, 401, 'a removed member\'s session no longer works');
+    assertEqual((await mcpToolsList(base, '/b/alpha/mcp', bobBearer)).status, 401, 'a removed member\'s token no longer works');
+    ok('invites by GitHub login: editors draw, viewers only read (REST 403, WebSocket data frames dropped, read-only MCP tools); removal ends access');
+  } finally {
+    await gateway.stop();
+    await github.close();
+  }
+}
+
 try {
   console.log(`Board checks (scratch: ${scratch})`);
   await checkTwoBoards();
   await checkIdleAndCap();
   await checkMigrationAndAuth();
+  await checkInvitesAndViewers();
   console.log(`Board check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`Board check failed after ${passed} groups: ${error.stack || error.message}`);

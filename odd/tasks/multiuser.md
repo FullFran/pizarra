@@ -16,8 +16,8 @@ Branch: `feat/multiuser-pluggable-auth` (worktree `pizarra-multiuser`). Delivery
 |----|-------|-------|--------|----------|
 | T1 | S1, S5 | inline | done | boards context + shared locked JSON file; unit tests |
 | T2 | S2 | inline | done | identity provider port, plugin registry, AUTH_PROVIDERS; GitHub adapter unchanged (auth 41 groups green); unit providers.test.mjs |
-| T3 | S1 | inline | pending | |
-| T4 | S5 | inline | pending | |
+| T3 | S1 | inline | done (43f03c6) | RED: check-boards 0/4 on 7dbe546 (POST /boards 404). GREEN: check-boards 4 groups; proxy 11 (paths updated to boards/main); auth 41; MCP 9; unit 63; memory measured (docs/multiuser.md) |
+| T4 | S5 | inline | done | invites/viewer group in check-boards (5 groups); viewer code landed in T3, so no RED for it: mutation check instead (viewer REST filter disabled -> "a viewer cannot POST /b/alpha/api/elements (expected 403, got 200)"); unit gateway-boards.test.mjs (frame filter, tool list, path parser) |
 | T5 | S3 | inline | pending | |
 | T6 | S4 | inline | pending | |
 | T7 | S1-S5 docs | inline | pending | |
@@ -28,3 +28,4 @@ Route evidence: one bounded writer (this agent) works inline task by task; no wr
 
 - L1 (2026-11-05, Fran, verbatim): "pues manda un agente en pizarra para que haga toda la parte de multiusuario y que se pueda cambiar el auth como plugin por el auth de otros (en este caso el de hagalink)"
 - L2 (2026-11-05): Baseline 9484ee7: `npm test` green (unit 50, auth 41 groups, MCP 9, proxy 11). Findings that shape the design: the upstream frontend uses absolute paths (`/assets/...` in index.html and Vite's preload helper `"/"+dep`, `fetch("/api/...")`, WebSocket at `ws(s)://host/`); upstream MCP tools read `EXPRESS_SERVER_URL` and `EXCALIDRAW_EXPORT_DIR` once at import (module constants) and keep `sceneState` at module level; the upstream WebSocket server has no `message` handler (clients never write over it).
+- L3 (2026-11-05, T3/T4): Per-board MCP: upstream's config module is a constant snapshot of env at import, so each board imports its own copy of upstream's `dist/` modules via a `node:module` `register` resolve hook that propagates `?pizarra-board=<id>` from parent to child URLs inside the package (third-party packages stay shared); imports are serialized and env is set just before each. Board page: upstream's `index.html` gets `/__pizarra/board.js` first in `<head>`, which rewrites same-origin `fetch('/api/...')` and the root WebSocket to `/b/<id>/...`; `/assets/*` stays unprefixed and shared (Vite's preload helper builds `"/"+dep`). The pool front treats unprefixed paths as main, so the old single-canvas URL contract holds and older gateways keep working against a new canvas container. Upstream's WebSocket server has no message handler, so dropping a viewer's data frames cannot be observed on the wire; the frame filter is unit-tested and the wire check proves the connection keeps working (ping/pong, broadcasts) and the board is unchanged. Memory (Node 24, glibc): canvas ~124 MiB RSS / ~77 MiB PSS per open board; gateway +8.5 MiB per board whose MCP was used.
