@@ -62,3 +62,13 @@ test('viewer WebSocket: unmasked or reserved-opcode frames close both sides', as
     assert.ok(client.destroyed && upstream.destroyed);
   }
 });
+
+test('framing: board pages for the listed origins only; upstream CSP directives are kept', async () => {
+  const { framingHeaders, parseFrameAncestors } = await import('../../dist/gateway/domain/framing.js');
+  assert.deepEqual(parseFrameAncestors(' https://a.example, https://b.example:8443 https://a.example '), ['https://a.example', 'https://b.example:8443']);
+  assert.deepEqual(parseFrameAncestors(undefined), []);
+  for (const bad of ['*', 'https://*.example', 'http://a.example', 'https://a.example/x', "'self'"]) assert.throws(() => parseFrameAncestors(bad), /FRAME_ANCESTORS/, bad);
+  assert.deepEqual(framingHeaders('board', ['https://a.example'], undefined), { csp: 'frame-ancestors https://a.example' });
+  assert.deepEqual(framingHeaders('board', [], undefined), { csp: "frame-ancestors 'none'", xFrameOptions: 'DENY' });
+  assert.deepEqual(framingHeaders('other', ['https://a.example'], "default-src 'self'; frame-ancestors *"), { csp: "default-src 'self'; frame-ancestors 'none'", xFrameOptions: 'DENY' });
+});

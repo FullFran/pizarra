@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { parsePublicBaseUrl, parseTrustProxy } from './shared/network.js';
+import { parseFrameAncestors } from './gateway/domain/framing.js';
 
 export interface GatewayConfig {
   host: string;
@@ -18,6 +19,8 @@ export interface GatewayConfig {
   boardIdleSeconds: number;
   /** MAX_OPEN_BOARDS: at most this many canvases run at once, main included. */
   maxOpenBoards: number;
+  /** FRAME_ANCESTORS: origins allowed to frame board pages (none: nothing is framed). */
+  frameAncestors: string[];
   /**
    * PIZARRA_ROLE: `gateway` (default) serves the app; `canvas` only runs the
    * upstream canvas, for gateways elsewhere that point CANVAS_URL at it.
@@ -86,6 +89,7 @@ export function resolveGatewayConfig(env: Record<string, string | undefined>): G
     canvasPort,
     boardIdleSeconds,
     maxOpenBoards,
+    frameAncestors: parseFrameAncestors(env.FRAME_ANCESTORS),
     ...(dataDir ? { dataDir: resolve(dataDir) } : {}),
     ...(canvasDataDir ? { canvasDataDir: resolve(canvasDataDir) } : {}),
     ...(exportDir ? { exportDir: resolve(exportDir) } : {})

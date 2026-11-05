@@ -35,6 +35,7 @@ On a loopback bind, GitHub or auth variables without `AUTH_MODE=oauth` are ignor
 | `GITHUB_CLIENT_ID` | with `github` | Client ID of your GitHub OAuth app (public; not a secret). |
 | `ALLOWED_GITHUB_LOGINS` | with `github` | Comma-separated GitHub logins of the **admins**, case-insensitive, e.g. `FullFran`: they own every GitHub board and create boards. Anyone else gets in only once invited to a board. **There is no default**: if it is unset the server refuses to start, so nobody gets in by accident. |
 | `TRUSTED_ISSUERS` or `TRUSTED_ISSUERS_FILE` | with `trusted-issuer` | JSON array of the issuers whose signed board tickets are accepted. See [Trusted issuers](#trusted-issuers-signed-board-tickets). |
+| `FRAME_ANCESTORS` | no | Origins allowed to embed board pages in an iframe, separated by spaces or commas, e.g. `https://app.hagalink.es`. Exact `https` origins only. Empty (the default): nothing can be framed. See [Embedding boards](#embedding-boards). |
 | `TRUSTED_ISSUER_SESSION_TTL_SECONDS` | no | Lifetime of the board session a browser gets for a ticket. Default `28800` (8 h), 60–86400. |
 | `EXCALIDRAW_DATA_DIR` | yes | Data directory. Tokens and registered clients are kept in `auth-store.json` there, and the generated signing secret in `auth-secret` (both mode `0600`), with the fork's names and format; the boards and their members in `boards.json` (`0600`). It also turns on durable canvas state: each board keeps its canvas in `boards/<id>/canvas/` and its MCP files in `boards/<id>/files/` (see [docs/multiuser.md](multiuser.md); a single-canvas `canvas/` and `files/` are moved to board `main` on the first start). |
 | `CANVAS_DATA_DIR` | no | Board `main`'s canvas directory (upstream's `EXCALIDRAW_DATA_DIR`) instead of `$EXCALIDRAW_DATA_DIR/boards/main/canvas`; nothing is migrated when it is set. The fork kept `canvas-state-v1.json` and `blobs/` at the data directory's root: set `CANVAS_DATA_DIR` to the root to keep a fork-era drawing. |
@@ -122,6 +123,26 @@ The ticket is a compact JWS (a JWT) with these claims:
   issuer. From then on only that issuer's tickets open it: never another issuer's, never a GitHub
   account (admins included), and a ticket never opens a GitHub board or `main`. Issuer boards have
   no invites: the issuer decides who gets a ticket.
+
+### Embedding boards
+
+An application can show a board inside its own page (Hagalink Projects shows each project's board).
+
+- `FRAME_ANCESTORS=https://app.hagalink.es` lets exactly the listed origins frame **board pages**
+  (`/b/<id>/`, and `/` for board main): they are sent with
+  `Content-Security-Policy: frame-ancestors https://app.hagalink.es` and no `X-Frame-Options`.
+  An origin that is not listed cannot frame them.
+- Everything else refuses framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`): the sign-in,
+  device-code and consent pages **always**, even from a listed origin, so nobody can trick a
+  person into approving access inside someone else's page. With `FRAME_ANCESTORS` empty every page
+  refuses framing, as before.
+- `?embed=1` (`/b/<id>/?embed=1`, or `/b/<id>/enter?ticket=…&embed=1`) hides pizarra's own chrome
+  (the badge with the board name and the sign-out button) for the embedded view.
+- **Same-site requirement.** Cookies stay `SameSite=Lax`, so a framed board only gets its session
+  cookie when the embedding page is **same-site** with pizarra: serve pizarra under the embedder's
+  registrable domain (for `https://app.hagalink.es`, run it at `https://pizarra.hagalink.es`). No
+  third-party cookies are needed, and none are used. A cross-site embedder (another registrable
+  domain) would frame a board that cannot sign in.
 
 ### Writing an auth adapter
 
@@ -270,7 +291,7 @@ Defended against:
 - **Leaked refresh tokens:** rotation with family revocation on reuse; short-lived access tokens.
 - **Token confusion:** tokens are bound to `${PUBLIC_BASE_URL}/mcp` and refused anywhere else; RFC 9207 `iss` lets clients detect mix-up attacks.
 - **CSRF and cross-site WebSocket hijacking:** `SameSite=Lax` session cookie, an `Origin` check on every cookie-authenticated write whatever its path (paths are matched case-insensitively, as Express routes them, so `/API/…` gets the same rules as `/api/…`), on the consent form, the device login and the WebSocket; single-use consent tickets bound to the session.
-- **Clickjacking of the consent page:** `X-Frame-Options: DENY` and `frame-ancestors 'none'`.
+- **Clickjacking of the consent page:** `X-Frame-Options: DENY` and `frame-ancestors 'none'` on every sign-in and consent page, whatever `FRAME_ANCESTORS` says; only board pages can be framed, and only by the listed origins.
 - **SSRF through client metadata URLs:** https only, public addresses only, pinned connection, no redirects, size and time limits.
 - **Store disclosure:** the store holds only hashes; a copy of it does not grant access.
 - **Board tickets:** asymmetric signatures only (EdDSA, ES256; `HS*` and `none` always refused), the issuer's configured algorithm only, audience-bound to this pizarra, five-minute lifetime, single use in browsers (`claimOnce` in the shared store), one board each, never logged. A compromised issuer key opens only that issuer's boards.

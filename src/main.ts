@@ -20,6 +20,7 @@ import { RemoteCanvas } from './gateway/infrastructure/remote-canvas.js';
 import { BoardMcpFactories } from './gateway/infrastructure/upstream-mcp.js';
 import { MCP_HTTP_PATH } from './gateway/presentation/http/mcp-route.js';
 import { createGatewayApp } from './gateway/presentation/http/app.js';
+import { framingHeaders } from './gateway/domain/framing.js';
 import { createLogger } from './shared/logger.js';
 
 const logger = createLogger();
@@ -98,7 +99,14 @@ async function main(): Promise<void> {
     boards: boardDirectory(boards),
     upstream,
     proxy: new CanvasProxy(upstream, logger),
-    logger
+    logger,
+    framing: (headers, kind) => {
+      const upstreamCsp = headers['content-security-policy'];
+      const policy = framingHeaders(kind, config.frameAncestors, typeof upstreamCsp === 'string' ? upstreamCsp : undefined);
+      headers['content-security-policy'] = policy.csp;
+      if (policy.xFrameOptions) headers['x-frame-options'] = policy.xFrameOptions;
+      else delete headers['x-frame-options'];
+    }
   });
   const server = createServer(app);
   server.on('upgrade', onUpgrade);

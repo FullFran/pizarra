@@ -92,7 +92,7 @@ FROM base AS canvas
 COPY --chown=pizarra:pizarra --from=build /app/dist/canvas-main.js /app/dist/config.js ./dist/
 COPY --chown=pizarra:pizarra --from=build /app/dist/shared/network.js /app/dist/shared/logger.js /app/dist/shared/locked-json-file.js ./dist/shared/
 COPY --chown=pizarra:pizarra --from=build /app/dist/boards ./dist/boards
-COPY --chown=pizarra:pizarra --from=build /app/dist/gateway/domain/board-path.js /app/dist/gateway/domain/request-policy.js ./dist/gateway/domain/
+COPY --chown=pizarra:pizarra --from=build /app/dist/gateway/domain/board-path.js /app/dist/gateway/domain/request-policy.js /app/dist/gateway/domain/framing.js /app/dist/gateway/domain/origins.js ./dist/gateway/domain/
 COPY --chown=pizarra:pizarra --from=build /app/dist/gateway/infrastructure/upstream-canvas.js /app/dist/gateway/infrastructure/canvas-lock.js /app/dist/gateway/infrastructure/canvas-guardian.js /app/dist/gateway/infrastructure/canvas-pool.js /app/dist/gateway/infrastructure/pool-server.js /app/dist/gateway/infrastructure/canvas-proxy.js /app/dist/gateway/infrastructure/canvas-runtime.js /app/dist/gateway/infrastructure/legacy-layout.js ./dist/gateway/infrastructure/
 RUN node --check dist/canvas-main.js
 ENV PIZARRA_ROLE=canvas \
