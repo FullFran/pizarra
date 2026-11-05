@@ -20,7 +20,7 @@ Branch: `feat/multiuser-pluggable-auth` (worktree `pizarra-multiuser`). Delivery
 | T4 | S5 | inline | done | invites/viewer group in check-boards (5 groups); viewer code landed in T3, so no RED for it: mutation check instead (viewer REST filter disabled -> "a viewer cannot POST /b/alpha/api/elements (expected 403, got 200)"); unit gateway-boards.test.mjs (frame filter, tool list, path parser) |
 | T5 | S3, S2 | inline | done | RED: check-tickets against 12793b7 ("AUTH_PROVIDERS lists an unknown provider \"trusted-issuer\""). GREEN: check-tickets 4 groups; unit tickets.test.mjs; npm test all green |
 | T6 | S4 | inline | done | RED: check-embed on c739e45 ("board without FRAME_ANCESTORS: X-Frame-Options (expected DENY, got undefined)"). GREEN: check-embed 3 groups; unit framing test |
-| T7 | S1-S5 docs | inline | pending | |
+| T7 | S1-S5 docs | inline | done | README, compose comments, docs/auth.md (providers, issuers, claims, adapters, embedding, same-site), docs/multiuser.md (shape, migration, memory, decisions 2026-11-05) |
 
 Route evidence: one bounded writer (this agent) works inline task by task; no writer trigger fires inside it (units depend on each other).
 
