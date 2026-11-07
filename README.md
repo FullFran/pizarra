@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" alt="pizarra logo" width="120" height="120"></p>
+
 # pizarra
 
 [![M8ven Score](https://m8ven.ai/badge/mcp/fullfran-pizarra-18e1i3?v=ecffb38ec716d442f200b490db528b2f)](https://m8ven.ai/mcp/fullfran-pizarra-18e1i3?s=readme)
