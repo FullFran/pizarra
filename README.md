@@ -1,5 +1,7 @@
 # pizarra
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/fullfran-pizarra-18e1i3?v=ecffb38ec716d442f200b490db528b2f)](https://m8ven.ai/mcp/fullfran-pizarra-18e1i3?s=readme)
+
 A shared handwriting whiteboard for humans and agents. pizarra is an authenticated gateway in front of the unmodified [`mcp-excalidraw-server`](https://github.com/yctimlin/mcp_excalidraw) (pinned to an upstream commit, see [Upstream pin](#upstream-pin)): you draw on the Excalidraw canvas in a browser, and agents (ChatGPT, Claude Code, Codex, …) read and draw on the same board through MCP.
 
 - Several boards (`/b/<id>/`), each its own upstream canvas process, started on first use and stopped when idle; `/` and `/mcp` are board `main`, today's canvas. Editors and viewers per board, invited by GitHub login ([docs/multiuser.md](docs/multiuser.md)).
