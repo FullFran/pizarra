@@ -1,0 +1,56 @@
+# Build the pinned upstream mcp-excalidraw-server once and publish it as a release asset.
+# Compiling its frontend (Excalidraw + Mermaid) needs about 2 GB of RAM; GitHub-hosted runners
+# have plenty and are free for public repositories. Everyone else (tests, Docker, local setups)
+# downloads the asset through scripts/build-upstream.sh and checks it against package-lock.json.
+name: upstream tarball
+
+on:
+  push:
+    paths:
+      - upstream.json
+      - scripts/build-upstream.sh
+      - .github/workflows/upstream-tarball.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-tarball
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build and publish the tarball for this pin (skipped when the release exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit=$(jq -r .commit upstream.json)
+          short=${commit:0:12}
+          tag="upstream-$short"
+          asset="mcp-excalidraw-server-$short.tgz"
+          if gh release view "$tag" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$asset"; then
+            echo "Release $tag already has $asset; nothing to build."
+            gh release view "$tag" --json body -q .body >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          BUILD_FROM_SOURCE=1 sh scripts/build-upstream.sh
+          integrity="sha512-$(openssl dgst -sha512 -binary "vendor/$asset" | base64 -w0)"
+          locked_file=$(jq -r '.packages["node_modules/mcp-excalidraw-server"].resolved // ""' package-lock.json)
+          locked=$(jq -r '.packages["node_modules/mcp-excalidraw-server"].integrity // ""' package-lock.json)
+          if [ "$locked_file" = "file:vendor/$asset" ] && [ "$integrity" != "$locked" ]; then
+            echo "The pack is not reproducible: built $integrity, package-lock.json has $locked." >&2
+            exit 1
+          fi
+          notes="Built in GitHub Actions (run $GITHUB_RUN_ID) from $(jq -r .repository upstream.json) at $commit.
+          integrity: $integrity"
+          gh release create "$tag" "vendor/$asset" --target "$GITHUB_SHA" \
+            --title "Upstream mcp-excalidraw-server $short" --notes "$notes"
+          echo "$notes" >> "$GITHUB_STEP_SUMMARY"
