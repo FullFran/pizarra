@@ -72,12 +72,14 @@ Everything durable lives in the `/data` volume: tokens, registered clients, the 
 
 ## Upstream pin
 
-Upstream is used unmodified, but not from npm: the `2.1.2` npm release has no durable canvas state, while upstream `main` does (unreleased; its `package.json` still says `2.1.2`). The commit is recorded once, in [`upstream.json`](upstream.json). `scripts/build-upstream.sh` clones that commit, checks that `HEAD` is exactly it, runs upstream's own `npm ci && npm run build` and `npm pack`s it into `vendor/` (gitignored), from where `package.json` installs it as a `file:` tarball; the Docker image runs the same script in a build stage. The pack is reproducible, so `package-lock.json`'s integrity hash also checks the image's build. `test/unit/upstream.test.mjs` checks that `upstream.json`, `package.json`, the lockfile and the Dockerfile agree.
+Upstream is used unmodified, but not from npm: the `2.1.2` npm release has no durable canvas state, while upstream `main` does (unreleased; its `package.json` still says `2.1.2`). The commit is recorded once, in [`upstream.json`](upstream.json). `scripts/build-upstream.sh` clones that commit, checks that `HEAD` is exactly it, runs upstream's own `npm ci && npm run build` and `npm pack`s it into `vendor/` (gitignored), from where `package.json` installs it as a `file:` tarball; the Docker image runs the same script in a build stage. The pack is reproducible, so `package-lock.json`'s integrity hash also checks the image's build.
+
+Compiling upstream's frontend (Excalidraw + Mermaid) needs about 2 GB of RAM, so it is done once per pin in GitHub Actions: [`upstream-tarball.yml`](.github/workflows/upstream-tarball.yml) builds the tarball when `upstream.json` changes and publishes it as the release `upstream-<first 12 hex digits>`. `scripts/build-upstream.sh` downloads that asset and checks it against the lockfile's integrity hash instead of compiling; `BUILD_FROM_SOURCE=1` compiles it locally as before. Before publishing, the workflow checks that its build matches the integrity already in the lockfile, which proves the pack is reproducible. `test/unit/upstream.test.mjs` checks that `upstream.json`, `package.json`, the lockfile and the Dockerfile agree.
 
 To bump it:
 
-1. Put the new full commit SHA in `upstream.json`.
-2. `npm run build:upstream && npm install --save-exact ./vendor/mcp-excalidraw-server-<first 12 hex digits>.tgz`
+1. Put the new full commit SHA in `upstream.json` and push: the workflow publishes the release `upstream-<first 12 hex digits>`.
+2. `BUILD_FROM_SOURCE=1 npm run build:upstream && npm install --save-exact ./vendor/mcp-excalidraw-server-<first 12 hex digits>.tgz` (or download the release asset into `vendor/` and install it), so `package-lock.json` records its integrity.
 3. `npm test`, then rebuild the image.
 
 Once upstream publishes an npm release that contains durable state, switch back to the registry version (`npm install --save-exact mcp-excalidraw-server@<version>`), drop `upstream.json`, the script, the Docker `upstream` stage and the pin test.
