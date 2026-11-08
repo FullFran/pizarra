@@ -12,16 +12,16 @@
 #   - resvg's native prebuild is swapped to musl for the alpine runtime,
 #     so the upstream's headless PNG export works.
 
-# ---- upstream: build the unmodified canvas at the commit pinned in upstream.json ----
-# Upstream main has durable canvas state but no npm release yet, and its
-# `dist/` is only produced by `prepublishOnly`, so it is cloned, checked
-# against the pinned commit, built with its own lockfile and packed. The
-# same script builds vendor/ for local development. Same Node line as local
-# development, so the packed tarball matches package-lock.json's integrity.
+# ---- upstream: fetch the unmodified canvas at the commit pinned in upstream.json ----
+# Upstream main has durable canvas state but no npm release yet. Its packed
+# tarball is built once per pin by .github/workflows/upstream-tarball.yml and
+# published as a release asset; the script downloads it and checks it against
+# package-lock.json's integrity (compiling upstream's frontend needs about 2 GB
+# of RAM). git stays installed for BUILD_FROM_SOURCE=1, which compiles it here.
 FROM node:24-slim AS upstream
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY upstream.json ./
+COPY upstream.json package-lock.json ./
 COPY scripts/build-upstream.sh ./scripts/
 RUN ./scripts/build-upstream.sh && npm cache clean --force
 
