@@ -27,10 +27,77 @@ export const BOARD_SCRIPT = `(() => {
     return url.toString();
   };
   const originalFetch = window.fetch.bind(window);
+  // Live edits from other people. Upstream broadcasts only \`elements_synced\` (a count) when a
+  // browser syncs, and its page ignores it, so nobody sees a person's strokes until they reload.
+  // On someone else's sync this page reads the board and hands its own handler what changed, as
+  // the messages it already merges (\`elements_batch_created\`, \`element_deleted\`).
+  const known = new Map();
+  const IGNORED = new Set(['version', 'syncedAt', 'syncTimestamp', 'source', 'createdAt', 'updatedAt']);
+  const print = element => JSON.stringify(Object.keys(element).sort().filter(key => !IGNORED.has(key)).map(key => [key, element[key]]));
+  const remember = elements => { for (const element of elements) if (element && element.id) known.set(element.id, print(element)); };
+  const reset = elements => { known.clear(); remember(elements); };
+  let pendingEchoes = 0;
+  let pulling = false;
+  let pullAgain = false;
+  let deliver = null;
+  const pull = async () => {
+    if (pulling) { pullAgain = true; return; }
+    pulling = true;
+    try {
+      const response = await originalFetch(new URL(prefix + '/api/elements', window.location.href).toString(), { credentials: 'same-origin' });
+      if (!response.ok) return;
+      const body = await response.json();
+      const elements = Array.isArray(body && body.elements) ? body.elements : [];
+      const changed = elements.filter(element => element && element.id && known.get(element.id) !== print(element));
+      const ids = new Set(elements.map(element => element && element.id));
+      const removed = [...known.keys()].filter(id => !ids.has(id));
+      reset(elements);
+      if (!deliver) return;
+      if (changed.length > 0) deliver({ type: 'elements_batch_created', elements: changed });
+      for (const elementId of removed) deliver({ type: 'element_deleted', elementId });
+    } catch {
+      // The next sync tries again.
+    } finally {
+      pulling = false;
+      if (pullAgain) { pullAgain = false; void pull(); }
+    }
+  };
+  const observe = message => {
+    if (!message || typeof message !== 'object') return;
+    switch (message.type) {
+      case 'initial_elements': if (Array.isArray(message.elements)) reset(message.elements); break;
+      case 'element_created': case 'element_updated': if (message.element) remember([message.element]); break;
+      case 'elements_batch_created': if (Array.isArray(message.elements)) remember(message.elements); break;
+      case 'element_deleted': known.delete(message.elementId); break;
+      case 'canvas_cleared': known.clear(); break;
+      case 'elements_synced':
+        if (pendingEchoes > 0) pendingEchoes -= 1;
+        else void pull();
+        break;
+    }
+  };
+  const isSync = (url, init) => /\\/api\\/elements\\/sync$/.test(new URL(url, window.location.href).pathname) && String((init && init.method) || 'GET').toUpperCase() === 'POST';
+  const trackSync = (promise, init) => {
+    pendingEchoes += 1;
+    try {
+      const sent = JSON.parse(String(init.body));
+      if (Array.isArray(sent && sent.elements)) reset(sent.elements);
+    } catch {
+      // Not JSON: upstream rejects it, and the next pull settles what this page knows.
+    }
+    return promise.then(response => {
+      if (!response.ok) pendingEchoes = Math.max(0, pendingEchoes - 1);
+      return response;
+    }, error => {
+      pendingEchoes = Math.max(0, pendingEchoes - 1);
+      throw error;
+    });
+  };
   window.fetch = (input, init) => {
     if (typeof input === 'string' || input instanceof URL) {
       const rewritten = toBoard(String(input));
-      return originalFetch(rewritten || input, init);
+      const sent = originalFetch(rewritten || input, init);
+      return rewritten && isSync(rewritten, init) ? trackSync(sent, init) : sent;
     }
     if (input instanceof Request) {
       const rewritten = toBoard(input.url);
@@ -44,6 +111,16 @@ export const BOARD_SCRIPT = `(() => {
       const url = new URL(value, window.location.href);
       if (url.host === window.location.host && (url.pathname === '/' || url.pathname === '')) url.pathname = prefix + '/';
       super(url.toString(), protocols);
+    }
+    get onmessage() { return this.__pizarraHandler || null; }
+    set onmessage(handler) {
+      this.__pizarraHandler = handler;
+      if (typeof handler !== 'function') { super.onmessage = handler; return; }
+      deliver = message => handler.call(this, { data: JSON.stringify(message) });
+      super.onmessage = event => {
+        try { observe(JSON.parse(event.data)); } catch { /* not JSON: upstream's handler decides */ }
+        return handler.call(this, event);
+      };
     }
   };
   const embedded = new URLSearchParams(window.location.search).get('embed') === '1';
