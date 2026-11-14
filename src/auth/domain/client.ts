@@ -54,10 +54,17 @@ export function validateClientName(value: unknown): string | undefined {
   return value;
 }
 
+/**
+ * A client must be able to use the authorization code grant. Other grant types
+ * it declares are ignored rather than refused: the token endpoint only ever
+ * serves authorization_code and refresh_token, so listing more grants nothing
+ * (RFC 7591 §2 lets the server disregard requested metadata). ChatGPT's metadata
+ * document, for one, also lists urn:ietf:params:oauth:grant-type:jwt-bearer.
+ */
 export function validateGrantAndResponseTypes(body: Record<string, unknown>): void {
   const grants = body.grant_types ?? ['authorization_code'];
-  if (!Array.isArray(grants) || grants.some(grant => grant !== 'authorization_code' && grant !== 'refresh_token')) {
-    throw new ClientError('invalid_client_metadata', 'grant_types may only contain authorization_code and refresh_token');
+  if (!Array.isArray(grants) || grants.some(grant => typeof grant !== 'string') || !grants.includes('authorization_code')) {
+    throw new ClientError('invalid_client_metadata', 'grant_types must be a list of strings that includes authorization_code');
   }
   const responses = body.response_types ?? ['code'];
   if (!Array.isArray(responses) || responses.some(type => type !== 'code')) {

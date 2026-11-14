@@ -160,3 +160,31 @@ test('CIMD: a document that only allows confidential methods is still refused', 
   // The plain public case keeps working.
   assert.equal(clientFromMetadataDocument(id, JSON.stringify(base)).authMethod, 'none');
 });
+
+// Verbatim https://chatgpt.com/oauth/client.json, fetched 2026-11-14. Its
+// grant_types lists jwt-bearer, which made /oauth/authorize answer "Unknown
+// application: grant_types may only contain authorization_code and refresh_token".
+const CHATGPT_CIMD = '{"client_id":"https://chatgpt.com/oauth/client.json","client_uri":"https://chatgpt.com/","redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"],"token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["none","private_key_jwt"],"grant_types":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:jwt-bearer"],"response_types":["code"],"client_name":"ChatGPT","logo_uri":"https://persistent.oaistatic.com/sonic/misc/openai-logo.png","token_endpoint_auth_signing_alg":"RS256","jwks_uri":"https://chatgpt.com/oauth/jwks.json"}';
+
+test('CIMD: the real ChatGPT document is accepted as a public client', () => {
+  const client = clientFromMetadataDocument('https://chatgpt.com/oauth/client.json', CHATGPT_CIMD);
+  assert.equal(client.kind, 'cimd');
+  assert.equal(client.authMethod, 'none');
+  assert.equal(client.clientName, 'ChatGPT');
+  assert.deepEqual(client.redirectUris, ['https://chatgpt.com/connector_platform_oauth_redirect']);
+});
+
+// Grant types we do not implement are ignored (the token endpoint refuses them
+// anyway), but a client must be able to use the authorization code grant.
+test('client metadata: extra grant types are ignored, authorization_code is required', () => {
+  const id = 'https://app.example/client.json';
+  const base = { client_id: id, redirect_uris: ['https://app.example/cb'] };
+  const extra = { ...base, grant_types: ['authorization_code', 'client_credentials'] };
+  assert.equal(clientFromMetadataDocument(id, JSON.stringify(extra)).kind, 'cimd');
+  assert.equal(parseRegistration(extra).authMethod, 'none');
+  for (const grant_types of [['client_credentials'], ['refresh_token'], [], 'authorization_code', [42]]) {
+    const doc = { ...base, grant_types };
+    assert.throws(() => clientFromMetadataDocument(id, JSON.stringify(doc)), /grant_types/, JSON.stringify(grant_types));
+    assert.throws(() => parseRegistration(doc), /grant_types/, JSON.stringify(grant_types));
+  }
+});
