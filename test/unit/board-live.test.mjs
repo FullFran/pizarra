@@ -80,3 +80,18 @@ test('a sync that changed nothing this page lacks sends nothing', async () => {
   await settle(); await settle();
   assert.deepEqual(p.received.map(m => m.type), ['initial_elements', 'elements_synced']);
 });
+
+test('an echo lost while the socket reconnects does not swallow the next sync from someone else', async () => {
+  const p = page({ serverElements: [] });
+  p.socket.emit({ type: 'initial_elements', elements: [] });
+  // This page syncs, but its socket drops before the echo: the broadcast never reaches it.
+  await p.fetch('/api/elements/sync', { method: 'POST', body: JSON.stringify({ elements: [el('a', 1)] }) });
+  // The reconnected socket starts again from the full scene.
+  p.socket.emit({ type: 'initial_elements', elements: [el('a', 1)] });
+  p.setServer([el('a', 1), el('b', 1)]);
+  p.socket.emit({ type: 'elements_synced', count: 2 });
+  await settle(); await settle();
+  const merged = p.received.find(m => m.type === 'elements_batch_created');
+  assert.ok(merged, 'someone else\'s sync must be pulled');
+  assert.deepEqual(merged.elements.map(e => e.id), ['b']);
+});

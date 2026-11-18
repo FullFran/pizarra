@@ -65,7 +65,9 @@ export const BOARD_SCRIPT = `(() => {
   const observe = message => {
     if (!message || typeof message !== 'object') return;
     switch (message.type) {
-      case 'initial_elements': if (Array.isArray(message.elements)) reset(message.elements); break;
+      // A new connection starts here. Echoes of syncs sent before it may never arrive (upstream
+      // broadcasts only to open sockets); waiting for them would skip someone else's next sync.
+      case 'initial_elements': pendingEchoes = 0; if (Array.isArray(message.elements)) reset(message.elements); break;
       case 'element_created': case 'element_updated': if (message.element) remember([message.element]); break;
       case 'elements_batch_created': if (Array.isArray(message.elements)) remember(message.elements); break;
       case 'element_deleted': known.delete(message.elementId); break;
