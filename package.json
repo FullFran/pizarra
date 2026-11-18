@@ -25,7 +25,7 @@
     "test": "npm run build && npm run test:unit && npm run test:auth && npm run test:mcp-http && npm run test:proxy && npm run test:boards && npm run test:tickets && npm run test:embed"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/server": "2.4.0",
     "express": "4.22.3",
     "mcp-excalidraw-server": "file:vendor/mcp-excalidraw-server-66b768b47914.tgz",
     "ws": "8.22.1"
@@ -39,5 +39,9 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/FullFran/pizarra.git"
+  },
+  "overrides": {
+    "@modelcontextprotocol/server": "$@modelcontextprotocol/server",
+    "@modelcontextprotocol/core": "2.4.0"
   }
 }

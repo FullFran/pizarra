@@ -380,6 +380,44 @@ async function checkInvalidPublicBaseUrl() {
   assert(canvas.output().includes('PUBLIC_BASE_URL'), `invalid PUBLIC_BASE_URL: error must name the variable, got ${JSON.stringify(canvas.output())}`);
 }
 
+// GHSA-f897-62hf-6gxq: the SDK must bound what one request can make it parse.
+async function checkOversizedBodyRejected({ port }) {
+  const response = await rawRequest(port, {
+    headers: modernHeaders('tools/list'),
+    body: { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: envelope(), pad: 'x'.repeat(5 * 1024 * 1024) } }
+  });
+  assertEqual(response.status, 413, 'body over 4 MiB: HTTP status');
+}
+
+async function checkOversizedBatchRejected({ port }) {
+  const batch = Array.from({ length: 101 }, (_, index) => ({ jsonrpc: '2.0', id: index + 1, method: 'ping' }));
+  const response = await rawRequest(port, { headers: { 'mcp-protocol-version': LEGACY_VERSION }, body: batch });
+  assertEqual(response.status, 400, 'batch of 101 messages: HTTP status');
+}
+
+// GHSA-jm63-cq47-j5jp: concurrent clients on one board, reusing the same
+// JSON-RPC id, each get their own answer and nothing from the other.
+async function checkConcurrentClientsIsolated({ port }) {
+  const ids = Array.from({ length: 8 }, (_, index) => `concurrent-${index}`);
+  const responses = await Promise.all(ids.map(id => rawRequest(port, {
+    headers: modernHeaders('tools/call', 'create_element'),
+    body: {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/call',
+      params: { _meta: envelope(), name: 'create_element', arguments: { id, type: 'rectangle', x: 0, y: 0, width: 10, height: 10 } }
+    }
+  })));
+  responses.forEach((response, index) => {
+    const result = resultOf(response, 7, `concurrent client ${index}`);
+    const text = JSON.stringify(result);
+    assert(text.includes(ids[index]), `concurrent client ${index}: answer must be about its own element, got ${text.slice(0, 200)}`);
+    for (const other of ids) {
+      if (other !== ids[index]) assert(!text.includes(other),`concurrent client ${index}: answer leaked ${other}`);
+    }
+  });
+}
+
 async function main() {
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -395,7 +433,10 @@ async function main() {
     ['localhost Origin is accepted on loopback', () => checkLocalOriginAccepted(ctx)],
     ['REST API is unaffected by the /mcp guard', () => checkRestUnaffectedByMcpGuard(ctx)],
     ['PUBLIC_BASE_URL host is accepted, others still rejected', checkPublicBaseUrl],
-    ['invalid PUBLIC_BASE_URL fails startup', checkInvalidPublicBaseUrl]
+    ['invalid PUBLIC_BASE_URL fails startup', checkInvalidPublicBaseUrl],
+    ['a body over 4 MiB is refused with 413', () => checkOversizedBodyRejected(ctx)],
+    ['a batch over 100 messages is refused', () => checkOversizedBatchRejected(ctx)],
+    ['concurrent clients with the same JSON-RPC id get their own answers', () => checkConcurrentClientsIsolated(ctx)]
   ];
 
   let failed = 0;
