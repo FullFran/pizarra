@@ -29,3 +29,16 @@ test('the canvas image copies every module the canvas role imports', () => {
     assert.ok(sources.some(source => rel === source || rel.startsWith(`${source}/`)), `${rel} is not copied into the canvas image`);
   }
 });
+
+test('the agent engine is in the runtime image and not in the canvas image', () => {
+  const dockerfile = readFileSync(join(root, 'Dockerfile'), 'utf8');
+  const canvas = dockerfile.slice(dockerfile.indexOf('FROM base AS canvas'), dockerfile.indexOf('FROM base AS runtime'));
+  const runtime = dockerfile.slice(dockerfile.indexOf('FROM base AS runtime'));
+  assert.match(dockerfile, /^FROM node:24-slim AS engine$/m);
+  assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+  assert.match(runtime, /COPY [^\n]*--from=engine \/app\/engine \.\/engine/);
+  assert.match(runtime, /node --check engine\/main\.mjs/);
+  assert.doesNotMatch(canvas, /engine/i);
+  const base = dockerfile.slice(dockerfile.indexOf('FROM alpine'), dockerfile.indexOf('FROM base AS canvas'));
+  assert.doesNotMatch(base, /--from=engine/);
+});

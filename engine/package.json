@@ -1,0 +1,14 @@
+{
+  "name": "pizarra-agent-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The agent engine process of Pizarra: one pi session per person and board. The gateway never imports it; it runs as a child process.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2"
+  }
+}

@@ -50,6 +50,15 @@ RUN VERS=$(node -p "require('./node_modules/@resvg/resvg-js/package.json').versi
     rm -f /tmp/resvg.tgz /tmp/resvgjs.linux-$ARCH-musl.node && \
     rm -rf vendor
 
+# ---- engine: the agent engine's dependencies (pi), kept out of the gateway's node_modules ----
+# engine/main.mjs runs as a child process of the gateway and is copied into the runtime target
+# only (never `canvas`). Install scripts stay off: pi needs none.
+FROM node:24-slim AS engine
+WORKDIR /app/engine
+COPY engine/package.json engine/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY engine/main.mjs engine/draft.mjs ./
+
 # ---- base: alpine + Node from the alpine repo (no npm at runtime) ----
 # Shared by both images below; everything here changes only with dependencies.
 FROM alpine:3.23 AS base
@@ -106,7 +115,9 @@ CMD ["node", "dist/canvas-main.js"]
 # ---- runtime (default, last stage): the gateway, with its own canvas unless CANVAS_URL is set ----
 FROM base AS runtime
 COPY --chown=pizarra:pizarra --from=build /app/dist ./dist
-RUN node --check dist/main.js
+COPY --chown=pizarra:pizarra --from=engine /app/engine ./engine
+RUN node --check dist/main.js && node --check engine/main.mjs && \
+    node --input-type=module -e "const pi = await import('./engine/node_modules/@earendil-works/pi-coding-agent/dist/index.js'); console.log('smoke: pi SDK ' + pi.VERSION)"
 ENV HOST=0.0.0.0 \
     PORT=3000 \
     CANVAS_INTERNAL_PORT=3100
