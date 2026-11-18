@@ -14,10 +14,12 @@ Branch: `fix/mcp-sdk-advisories`. Delivery: push, PR and deploy are Fran's call.
 
 - [x] T1 (S1, S2) inline: `@modelcontextprotocol/server` and `core` to 2.4.0 with npm `overrides` (the upstream tarball pins 2.0.0 exactly); lockfile; full suite. Commit 554d890.
 - [x] T2 (S1, S2) inline: wire checks for oversized body, batch over the cap, concurrent clients on one board (SDK 2.4.0 enforces 4 MiB and 100 messages itself; no gateway change). RED on 2.0.0: body and batch checks fail; concurrency passes on both (jm63 not reachable). Commit 554d890.
-- [x] T3 (S3, S5) inline: docs/security-advisories.md (reachability, remaining zod finding, image check). S4 image scan and S5 deployed version: pending, not run here.
+- [x] T3 (S3, S5) inline: docs/security-advisories.md (reachability, remaining zod finding, image check). S4: runtime image built locally (`docker build --target runtime`), only @modelcontextprotocol/server and core 2.4.0 inside; zod 3.25.76 remains (documented). S5 deployed version: pending, Fran's rollout.
 
 ## Log
 
 - L1 (2026-11-18, user, verbatim): "vamos con esos 2!" (PR #19 review and issue #15)
 - L2 (2026-11-18): Advisory map (explorer). Patched: server 2.3.0 for 46jr/jm63/rvq5, 2.1.0 for f897; latest server/core 2.4.0. Tarball mcp-excalidraw-server@66b768b pins server/core 2.0.0 exactly; upstream main still pins 2.0.0. Reachability: f897 partly (express.raw 10mb in mcp-route.ts then SDK fetch, after auth); 46jr yes for authenticated clients, and the SDK fix `maxToolInputElements` is opt-in in upstream's McpServer constructor; jm63 not reachable (new McpServer per request); rvq5 not reachable (gateway's own audience check, SDK requireBearerAuth unused).
 - L3 (2026-11-18): After upgrade `npm ls` shows one deduped 2.4.0 copy of server and core. `npm test` green: unit 77, auth 41 groups, MCP HTTP 12, proxy 11, boards 5, tickets 4, embed 3. `npm audit --omit=dev` still reports GHSA-mrhx-c7xc-m3w5 (zod 3.25.76 used only by upstream; fixed only in zod 4.6.6). 46jr only partly mitigated: maxToolInputElements must be set in upstream's McpServer constructor.
+- L4 (2026-11-19, user, verbatim): "hazlo! y soluciona lo que haga falta y mergea"
+- L5 (2026-11-19): Verifier: S1-S3 pass, S4-S5 not verifiable then. Fixed its drift note (core is now a direct dependency, both overrides follow it, 576375b). Image scan done locally, see T3.
