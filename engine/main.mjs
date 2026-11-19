@@ -13,13 +13,14 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
 import {
   createAgentSession, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, VERSION,
 } from '@earendil-works/pi-coding-agent';
 import {
   AGENT_TOOLS, DEVICE_VERIFICATION_URI, DRAFT_TOOLS, encode, LineDecoder, MCP_SERVER_NAME, MCP_TOOL_PREFIX,
-  MODEL_ID, parseCredential, toErrorCode,
+  isThinkingLevel, MODEL_ID, parseCredential, toErrorCode,
 } from '../dist/agent/protocol.js';
 import { baseToolName, createDraftThrottle, draftElements } from './draft.mjs';
 
@@ -172,6 +173,16 @@ async function listModels() {
   return catalog;
 }
 
+/** The models the panel may offer: the account's, allowlist applied, with their thinking levels. */
+async function sendModels() {
+  try {
+    const models = catalog ?? await listModels();
+    send({ type: 'models', models: models.map((model) => ({ id: model.id, name: model.name, levels: getSupportedThinkingLevels(model) })) });
+  } catch (error) {
+    send({ type: 'models.failed', code: toErrorCode(codeOf(error), 'engine_unavailable') });
+  }
+}
+
 /** The model asked for when the account offers it and the allowlist allows it, else the first. */
 async function chooseModel(active, wanted) {
   const models = catalog ?? await listModels();
@@ -314,7 +325,7 @@ async function createSession(start) {
   return created.session;
 }
 
-async function prompt(text, model) {
+async function prompt(text, model, thinking) {
   if (running) return send({ type: 'error', code: 'turn_in_progress' });
   if (!session) return send({ type: 'error', code: 'engine_unavailable' });
   running = true;
@@ -332,6 +343,9 @@ async function prompt(text, model) {
       return process.exit(1);
     }
     await chooseModel(active, model);
+    // Pi clamps a level the model does not support; the panel shows what the turn really uses.
+    if (thinking) active.setThinkingLevel(thinking);
+    send({ type: 'settings', model: active.model.id, thinking: active.thinkingLevel });
     await active.prompt(text);
     const last = active.messages.at(-1);
     if (aborting || last?.stopReason === 'aborted') send({ type: 'done', aborted: true });
@@ -399,8 +413,11 @@ function handle(m) {
     case 'prompt': {
       if (typeof m.text !== 'string' || !m.text.trim() || m.text.length > MAX_PROMPT_CHARS) return send({ type: 'error', code: 'provider_error' });
       const model = typeof m.model === 'string' && MODEL_ID.test(m.model) ? m.model : undefined;
-      return void prompt(m.text, model);
+      const thinking = isThinkingLevel(m.thinking) ? m.thinking : undefined;
+      return void prompt(m.text, model, thinking);
     }
+    case 'models':
+      return void sendModels();
     case 'reset':
       return void resetHistory();
     case 'abort':

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { BOARD_SCRIPT, injectBoardScript } from '../../dist/gateway/presentation/http/board-page.js';
+import { THINKING_LEVELS } from '../../dist/agent/protocol.js';
 import { AGENT_SCRIPT, AGENT_SCRIPT_PATH } from '../../dist/agent/panel.js';
 
 /** A style that behaves like the browser's: assigning cssText replaces every declaration. */
@@ -65,7 +66,7 @@ class FakeEventSource {
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setTimeout(resolve, 0)); };
 const sse = frames => frames.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('');
 
-function page({ search = '', status, login, prompt = [], withBoard = true, withAgent = true } = {}) {
+function page({ search = '', status, login, prompt = [], withBoard = true, withAgent = true, models, storage = new Map() } = {}) {
   FakeEventSource.all = [];
   const calls = [];
   const timers = [];
@@ -82,6 +83,7 @@ function page({ search = '', status, login, prompt = [], withBoard = true, withA
       return { ok: true, status: 200, json: async () => value };
     }
     if (url.endsWith('/__agent/login')) return { ok: true, status: 200, json: async () => login };
+    if (url.endsWith('/__agent/models') && models) return { ok: true, status: 200, json: async () => ({ models }) };
     if (url.endsWith('/__agent/prompt')) {
       const bytes = new TextEncoder().encode(sse(prompt));
       let sent = false;
@@ -100,6 +102,7 @@ function page({ search = '', status, login, prompt = [], withBoard = true, withA
   const window = {
     location: { href: `https://pizarra.test/b/main/${search}`, origin: 'https://pizarra.test', host: 'pizarra.test', search },
     fetch, WebSocket: FakeWebSocket, EventSource: FakeEventSource,
+    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)) },
   };
   const make = src => ({ dataset: { board: 'main' }, src });
   const document = {
@@ -123,7 +126,7 @@ function page({ search = '', status, login, prompt = [], withBoard = true, withA
   }
   const nodes = () => body.all();
   const find = (tag, text) => nodes().find(n => n.tagName === tag && n.textContent.includes(text));
-  return { window, body, calls, delivered, timers, nodes, find, events: () => FakeEventSource.all[0], fetch: (...a) => window.fetch(...a) };
+  return { window, body, calls, delivered, timers, nodes, find, storage, events: () => FakeEventSource.all[0], fetch: (...a) => window.fetch(...a) };
 }
 
 const drafts = p => p.delivered.filter(m => m.type === 'elements_batch_created');
@@ -277,4 +280,70 @@ test('the Agent button opens the panel and a theme repaint keeps it open', async
   assert.equal(panel.style.display, 'flex', 'the panel is visible after a click');
   toggle.fire('click');
   assert.equal(panel.style.display, 'none', 'a second click closes it');
+});
+
+const MODELS = [
+  { id: 'gpt-a', name: 'GPT A', levels: ['off', 'low', 'medium', 'high'] },
+  { id: 'gpt-b', name: 'GPT B <b>', levels: ['off'] },
+];
+const selects = p => {
+  const [model, thinking] = p.nodes().filter(n => n.tagName === 'SELECT');
+  return { model, thinking };
+};
+
+test('the panel offers the account\'s models and their thinking levels, and remembers the choice', async () => {
+  const storage = new Map([['pizarra.agent.choice', JSON.stringify({ model: 'gpt-a', thinking: 'high' })]]);
+  const p = page({ status: connected, models: MODELS, storage, prompt: [['settings', { model: 'gpt-a', thinking: 'medium' }], ['done', { aborted: false }]] });
+  await settle();
+  assert.ok(p.calls.some(c => c.url.endsWith('/__agent/models') && c.method === 'POST'), 'the list is asked for once connected');
+  const { model, thinking } = selects(p);
+  assert.deepEqual(model.children.map(o => [o.value, o.textContent]), [['gpt-a', 'GPT A'], ['gpt-b', 'GPT B <b>']], 'names are text');
+  assert.deepEqual(thinking.children.map(o => o.value), ['off', 'low', 'medium', 'high']);
+  assert.equal(model.value, 'gpt-a');
+  assert.equal(thinking.value, 'high', 'the saved choice comes back');
+
+  // A model without reasoning offers only "off"; the choice is saved.
+  model.value = 'gpt-b';
+  model.fire('change');
+  assert.deepEqual(thinking.children.map(o => o.value), ['off']);
+  assert.equal(thinking.value, 'off');
+  assert.equal(thinking.disabled, true);
+  assert.deepEqual(JSON.parse(p.storage.get('pizarra.agent.choice')), { model: 'gpt-b', thinking: 'off' });
+
+  // Back to a reasoning model: the level is clamped like pi does (off stays off).
+  model.value = 'gpt-a';
+  model.fire('change');
+  thinking.value = 'low';
+  thinking.fire('change');
+  assert.deepEqual(JSON.parse(p.storage.get('pizarra.agent.choice')), { model: 'gpt-a', thinking: 'low' });
+
+  // Each turn carries the choice; the engine's effective settings are shown.
+  const input = p.nodes().find(n => n.tagName === 'TEXTAREA');
+  input.value = 'draw';
+  input.fire('keydown', { key: 'Enter', shiftKey: false });
+  await settle();
+  const post = p.calls.find(c => c.url.endsWith('/__agent/prompt'));
+  assert.deepEqual(JSON.parse(post.body), { text: 'draw', model: 'gpt-a', thinking: 'low' });
+  assert.equal(thinking.value, 'medium', 'the settings event shows the level the turn really used');
+  assert.deepEqual(JSON.parse(p.storage.get('pizarra.agent.choice')), { model: 'gpt-a', thinking: 'low' }, 'and does not overwrite the saved choice');
+});
+
+test('a saved level the model lacks is clamped up, then down', async () => {
+  const p = page({ status: connected, models: [{ id: 'gpt-a', name: 'A', levels: ['off', 'low', 'medium'] }], storage: new Map([['pizarra.agent.choice', JSON.stringify({ model: 'gone', thinking: 'xhigh' })]]) });
+  await settle();
+  const { model, thinking } = selects(p);
+  assert.equal(model.value, 'gpt-a', 'an unknown saved model falls back to the first');
+  assert.equal(thinking.value, 'medium');
+});
+
+test('a list with no valid model leaves the selectors hidden', async () => {
+  const p = page({ status: connected, models: [{ id: 'bad id!', name: 'x', levels: ['off'] }] });
+  await settle();
+  const row = selects(p).model.parent;
+  assert.equal(row.style.display, 'none');
+});
+
+test('the panel knows the same thinking levels as the protocol', () => {
+  const levels = /const LEVELS = (\[[^\]]*\]);/.exec(AGENT_SCRIPT)[1];
+  assert.deepEqual(JSON.parse(levels.replace(/'/g, '"')), [...THINKING_LEVELS]);
 });

@@ -5,6 +5,8 @@
 //   hang     never finish by itself; an abort ends the turn as aborted
 //   die      preview a shape, then exit without finishing
 //   badtools announce a tool outside the agent's list
+//   choice   report the model and thinking level it was asked for (an unknown level clamps to high)
+// `models` answers two models, the first without a name a browser could misread; a third, bogus one is dropped.
 import { createInterface } from 'node:readline';
 
 const send = message => process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -13,8 +15,12 @@ const credential = n => ({ access: `fake-access-${n}`, refresh: `fake-refresh-${
 const rect = { type: 'rectangle', x: 10, y: 20, width: 100, height: 50, backgroundColor: '#a5d8ff', id: 'sneaky', customData: { x: 1 } };
 let refreshes = 0;
 
-function turn(text) {
-  if (text === 'draw') {
+function turn(text, message) {
+  if (text === 'choice') {
+    send({ type: 'settings', model: message.model ?? 'gpt-fake-a', thinking: message.thinking === 'max' ? 'high' : (message.thinking ?? 'medium') });
+    send({ type: 'settings', model: 'not a model!', thinking: 'medium' });
+    send({ type: 'done', aborted: false });
+  } else if (text === 'draw') {
     send({ type: 'thinking', text: 'planning' });
     send({ type: 'delta', text: 'Drawing a box. ' });
     send({ type: 'draft', call: 1, elements: [rect] });
@@ -58,7 +64,13 @@ createInterface({ input: process.stdin }).on('line', line => {
       refreshes += 1;
       send({ type: 'refresh.done', id: message.id, credential: credential(refreshes) });
       break;
-    case 'prompt': turn(message.text); break;
+    case 'prompt': turn(message.text, message); break;
+    case 'models':
+      send({ type: 'models', models: [
+        { id: 'gpt-fake-a', name: 'Fake A', levels: ['high', 'off', 'low'] },
+        { id: 'gpt-fake-b', name: 'Fake\u0000B', levels: ['off'] },
+      ] });
+      break;
     case 'abort': send({ type: 'done', aborted: true }); break;
     case 'reset': send({ type: 'reset.done' }); break;
     case 'shutdown': process.exit(0); break;

@@ -4,7 +4,7 @@ import type { AgentAllowlist } from './allowlist.js';
 import type { AgentHub, HubEvent } from './hub.js';
 import { ENGINE_HTTP_STATUS, EngineError } from './manager.js';
 import type { AgentManager } from './manager.js';
-import { toErrorCode } from './protocol.js';
+import { MODEL_ID, isThinkingLevel, toErrorCode } from './protocol.js';
 
 export type AgentRole = 'owner' | 'editor' | 'viewer';
 
@@ -103,7 +103,7 @@ export function createAgentRouter(deps: AgentRouterDeps): Router {
   });
 
   // Everything below is for allowlisted editors; for anyone else it does not exist.
-  const POSTS = new Set(['/login', '/logout', '/abort', '/reset', '/prompt']);
+  const POSTS = new Set(['/login', '/logout', '/abort', '/reset', '/prompt', '/models']);
   router.use((req, res, next) => {
     if (req.method !== 'POST' || !POSTS.has(req.path) || !mayUseAgent(context(res), allowlist)) return notFound(res);
     // Cookie-authenticated writes come only from our own pages (CSRF).
@@ -147,11 +147,23 @@ export function createAgentRouter(deps: AgentRouterDeps): Router {
     }
   });
 
+  router.post('/models', async (req, res) => {
+    const { login, board } = who(res);
+    try {
+      res.json({ models: await manager.models(login, board) });
+    } catch (error) {
+      engineFailure(res, error);
+    }
+  });
+
   router.post('/prompt', async (req, res) => {
     const { login, board } = who(res);
-    const body = req.body as { text?: unknown } | null;
-    const text = typeof body === 'object' && body !== null ? body.text : undefined;
+    const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as { text?: unknown; model?: unknown; thinking?: unknown };
+    const text = body.text;
     if (typeof text !== 'string' || !text.trim() || text.length > MAX_TEXT) return refuse(res, 'invalid_text', 400);
+    if (body.model !== undefined && (typeof body.model !== 'string' || !MODEL_ID.test(body.model))) return refuse(res, 'invalid_request', 400);
+    if (body.thinking !== undefined && !isThinkingLevel(body.thinking)) return refuse(res, 'invalid_request', 400);
+    const choice = { ...(body.model ? { model: body.model as string } : {}), ...(body.thinking ? { thinking: body.thinking } : {}) };
     let turn: Promise<void>;
     let streaming = false;
     let finished = false;
@@ -161,7 +173,7 @@ export function createAgentRouter(deps: AgentRouterDeps): Router {
           if (!streaming) return;
           frame(res, name, name === 'error' ? { code: toErrorCode((data as { code?: unknown }).code) } : data);
         }
-      });
+      }, choice);
     } catch (error) {
       return engineFailure(res, error);
     }

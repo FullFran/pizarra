@@ -9,7 +9,7 @@ import type { Logger } from '../shared/logger.js';
 import type { AgentBroadcast } from './hub.js';
 import { AGENT_SYSTEM_PROMPT } from './prompt.js';
 import { AGENT_TOOLS, DEVICE_VERIFICATION_URI, LineDecoder, MCP_TOOL_PREFIX, encode, parseChildMessage } from './protocol.js';
-import type { ChildMessage, EngineErrorCode, ParentMessage, StoredCredential } from './protocol.js';
+import type { ChildMessage, EngineErrorCode, ModelInfo, ParentMessage, StoredCredential, ThinkingLevel } from './protocol.js';
 import type { EngineTokens } from './tokens.js';
 import { CredentialVault } from './vault.js';
 
@@ -74,8 +74,14 @@ export const ENGINE_HTTP_STATUS: Record<EngineErrorCode, number> = {
   model_unavailable: 400
 };
 
+/** The model and thinking level a person asked for; the engine applies the allowlist and clamps. */
+export interface TurnChoice {
+  model?: string;
+  thinking?: ThinkingLevel;
+}
+
 export interface TurnSink {
-  event(name: 'delta' | 'thinking' | 'tool' | 'done' | 'error', data: object): void;
+  event(name: 'delta' | 'thinking' | 'tool' | 'settings' | 'done' | 'error', data: object): void;
 }
 
 export interface AgentStatus {
@@ -141,6 +147,8 @@ interface Proc {
   refreshes: Map<string, Deferred<StoredCredential>>;
   /** A history reset sent and not yet confirmed. */
   resetting?: { reply: Deferred<void>; timeout: NodeJS.Timeout };
+  /** A model list asked for and not yet answered. */
+  listing?: { reply: Deferred<ModelInfo[]>; timeout: NodeJS.Timeout };
   /** Detached from its person: it takes no new work. It may still deliver a refresh. */
   stopped: boolean;
   /** The person disconnected: a refresh that comes back is thrown away. */
@@ -284,7 +292,7 @@ export class AgentManager {
    * Runs one turn. Refusals are thrown before anything is streamed; after that every outcome,
    * failures included, arrives through the sink. Resolves when the turn ends.
    */
-  prompt(login: string, board: string, text: string, sink: TurnSink): Promise<void> {
+  prompt(login: string, board: string, text: string, sink: TurnSink, choice: TurnChoice = {}): Promise<void> {
     if (this.closed) throw new EngineError('engine_unavailable');
     if (this.people.get(login)?.procs.get(board)?.turn) throw new EngineError('turn_in_progress');
     if (!this.hasCredential(login)) throw new EngineError('not_connected');
@@ -294,20 +302,49 @@ export class AgentManager {
       this.stop(person, 'max_age', old);
     }
     const proc = this.ensureProc(person, board, true);
-    if (!proc.token) {
-      proc.token = this.s.tokens.mint({ login, board }, this.s.maxAgeMs);
-      this.send(proc, {
-        type: 'start', mcpUrl: this.s.mcpUrl(board), mcpToken: proc.token, systemPrompt: this.s.systemPrompt,
-        ...(this.allowedModels ? { allowedModels: this.allowedModels } : {})
-      });
-    }
+    this.start(proc);
     return new Promise<void>(resolve => {
       const timeout = setTimeout(() => this.limitTurn(person, proc), this.s.turnTimeoutMs);
       timeout.unref();
       proc.turn = { sink, end: resolve, bytes: 0, limited: false, timeout, ended: new Set() };
       this.setWorking(proc, true);
-      this.send(proc, { type: 'prompt', text });
+      this.send(proc, { type: 'prompt', text, ...(choice.model ? { model: choice.model } : {}), ...(choice.thinking ? { thinking: choice.thinking } : {}) });
       this.touch(person, proc);
+    });
+  }
+
+  /**
+   * The models of this person's account the operator allows, with their thinking levels.
+   * Starts this board's process when there is none: the engine lists them with the account.
+   */
+  async models(login: string, board: string): Promise<ModelInfo[]> {
+    if (this.closed) throw new EngineError('engine_unavailable');
+    if (!this.hasCredential(login)) throw new EngineError('not_connected');
+    const person = this.personOf(login);
+    const proc = this.ensureProc(person, board, true);
+    this.start(proc);
+    if (!proc.listing) {
+      const reply = deferred<ModelInfo[]>();
+      const timeout = setTimeout(() => {
+        if (proc.listing?.reply !== reply) return;
+        proc.listing = undefined;
+        reply.reject(new EngineError('engine_unavailable'));
+      }, this.s.replyTimeoutMs);
+      timeout.unref();
+      proc.listing = { reply, timeout };
+      this.send(proc, { type: 'models' });
+      this.touch(person, proc);
+    }
+    return proc.listing.reply.promise;
+  }
+
+  /** Sends `start` once per process: the board's MCP endpoint, a fresh engine token, the prompt. */
+  private start(proc: Proc): void {
+    if (proc.token) return;
+    proc.token = this.s.tokens.mint({ login: proc.login, board: proc.board }, this.s.maxAgeMs);
+    this.send(proc, {
+      type: 'start', mcpUrl: this.s.mcpUrl(proc.board), mcpToken: proc.token, systemPrompt: this.s.systemPrompt,
+      ...(this.allowedModels ? { allowedModels: this.allowedModels } : {})
     });
   }
 
@@ -529,6 +566,22 @@ export class AgentManager {
         resetting.reply.resolve();
         return;
       }
+      case 'models':
+      case 'models.failed': {
+        const listing = proc.listing;
+        if (!listing) return;
+        proc.listing = undefined;
+        clearTimeout(listing.timeout);
+        if (message.type === 'models') listing.reply.resolve(message.models);
+        else listing.reply.reject(new EngineError(message.code));
+        return;
+      }
+      case 'settings': {
+        const turn = proc.turn;
+        if (!turn || turn.limited) return;
+        turn.sink.event('settings', { model: message.model, thinking: message.thinking });
+        return;
+      }
     }
   }
 
@@ -686,6 +739,11 @@ export class AgentManager {
       clearTimeout(proc.resetting.timeout);
       proc.resetting.reply.resolve();
       proc.resetting = undefined;
+    }
+    if (proc.listing) {
+      clearTimeout(proc.listing.timeout);
+      proc.listing.reply.reject(new EngineError('engine_unavailable'));
+      proc.listing = undefined;
     }
     if (person.pending?.proc === proc) this.endLogin(person, 'engine_unavailable', false, true);
     this.log('stop', reason);

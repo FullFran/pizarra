@@ -46,8 +46,17 @@ All under `/b/<board>/__agent/` (the board must be open to you).
 - `GET status` -> `{"enabled","connected","busy","pending":{"userCode","verificationUri"}|null}`.
 - `POST login` -> `{"userCode","verificationUri"}`; `POST logout` (stops the engines, deletes the
   credential), `POST abort`, `POST reset` (forget the conversation on this board) -> 204.
-- `POST prompt` with `{"text"}` (1 to 8000 characters) -> `text/event-stream`: `delta` `{text}`,
+- `POST models` -> `{"models":[{"id","name","levels"}]}`: the models of your account that
+  `PIZARRA_AGENT_MODELS` allows, in the provider's order, each with the thinking levels it supports
+  (pi's `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; only `off` without reasoning).
+  It starts this board's engine when none is running.
+- `POST prompt` with `{"text"}` (1 to 8000 characters) and optionally `"model"` and `"thinking"`
+  (a level above; anything else is 400 `invalid_request`) -> `text/event-stream`: `settings`
+  `{model,thinking}` (what the turn really uses: a model the account or allowlist does not offer
+  becomes the first one, a level the model lacks becomes the nearest above it, else below), `delta` `{text}`,
   `thinking` `{text}`, `tool` `{call,name,phase,ok}`, then `done` `{aborted}` or `error` `{code}`.
+  The panel offers both as two selectors under the conversation and keeps your choice in this
+  browser (`localStorage`, key `pizarra.agent.choice`); without a choice the turn uses the first model at `medium`.
   A refusal before streaming is JSON `{"error":"<code>"}` (4xx, 429, 503). Closing the stream aborts the turn.
 - `GET events` -> `text/event-stream` for anyone on the board: `draft` `{id,elements}`,
   `draft.end` `{id}`, `agent` `{state,login}`, and a `: keepalive` comment every 25 seconds.
