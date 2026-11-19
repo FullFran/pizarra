@@ -14,6 +14,7 @@ import type { CanvasProxy } from '../../infrastructure/canvas-proxy.js';
 import { dropDataFrames } from '../../infrastructure/websocket-filter.js';
 import { AGENT_SCRIPT, AGENT_SCRIPT_PATH } from '../../../agent/panel.js';
 import { BOARD_SCRIPT, BOARD_SCRIPT_PATH, fetchBoardPage, injectBoardScript } from './board-page.js';
+import { BOARDS_PAGE_CSP, BOARDS_SCRIPT, BOARDS_SCRIPT_PATH, boardsPageHtml } from './boards-page.js';
 import { MCP_AUTH_INFO_LOCAL, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
 import { createMembersRouter } from './members.js';
 import { sendOutcome } from './responses.js';
@@ -124,6 +125,11 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.status(200).type('application/javascript').send(BOARD_SCRIPT);
+  });
+  app.get(BOARDS_SCRIPT_PATH, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.status(200).type('application/javascript').send(BOARDS_SCRIPT);
   });
   // The agent's board script (draft previews for every viewer, the panel for allowlisted
   // editors). No secret in it; it only exists with the agent on.
@@ -239,6 +245,22 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     return false;
   };
   app.get('/boards', (req, res) => {
+    // A browser navigating here gets the boards page; every other client keeps the JSON.
+    if (req.accepts(['json', 'html']) === 'html') {
+      if (auth && !auth.authenticator.authenticate({ cookie: single(req.headers.cookie) }, { resource: auth.resource, acceptSession: true, anyBoard: true }).ok) {
+        signIn(req, res);
+        return;
+      }
+      res.setHeader('Content-Security-Policy', BOARDS_PAGE_CSP);
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'same-origin');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Vary', 'Accept');
+      res.status(200).type('html').send(boardsPageHtml(Boolean(auth?.signInPath)));
+      return;
+    }
+    res.setHeader('Vary', 'Accept');
     const principal = requireSession(req, res);
     if (principal === false) return;
     res.setHeader('Cache-Control', 'no-store');

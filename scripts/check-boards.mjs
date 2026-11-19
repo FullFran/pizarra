@@ -172,6 +172,20 @@ async function checkMigrationAndAuth() {
     assertEqual((await request(base, { method: 'POST', path: '/boards', headers: cookie, json: { id: 'csrf' } })).status, 403, 'board creation with the cookie needs our Origin');
     await request(base, { method: 'POST', path: '/boards', headers: { ...cookie, origin: base }, json: { id: 'beta' } });
 
+    // A browser gets the boards page at /boards; any other client keeps the JSON.
+    const html = { accept: 'text/html,application/xhtml+xml,*/*;q=0.8' };
+    const boardsPage = await request(base, { path: '/boards', headers: { ...cookie, ...html } });
+    assertEqual(boardsPage.status, 200, 'the boards page with a session');
+    assert(/^text\/html/.test(boardsPage.headers['content-type']) && boardsPage.text.includes('src="/__pizarra/boards.js"'), 'the boards page is HTML that loads its script');
+    assert(/script-src 'self'/.test(boardsPage.headers['content-security-policy']) && /frame-ancestors 'none'/.test(boardsPage.headers['content-security-policy']), `the boards page CSP (${boardsPage.headers['content-security-policy']})`);
+    const anonymousPage = await request(base, { path: '/boards', headers: html });
+    assertEqual(anonymousPage.status, 302, 'the boards page without a session');
+    assert(anonymousPage.headers.location.startsWith('/oauth/login?return_to=%2Fboards'), 'the boards page sends to sign-in and back');
+    const listed = await request(base, { path: '/boards', headers: cookie });
+    assertEqual(JSON.stringify(listed.body?.boards?.map(b => b.id)), '["alpha","beta","main"]', 'without Accept: text/html /boards stays JSON');
+    const boardsScript = await request(base, { path: '/__pizarra/boards.js' });
+    assert(boardsScript.status === 200 && /javascript/.test(boardsScript.headers['content-type']), 'the boards page script');
+
     // Per-board resources: discovery, consent naming the board, audience binding.
     const anonymous = await mcpToolsList(base, '/b/alpha/mcp');
     assertEqual(anonymous.status, 401, '/b/alpha/mcp without a token');
@@ -204,7 +218,7 @@ async function checkMigrationAndAuth() {
     const refreshed = await request(base, { method: 'POST', path: '/oauth/token', form: { grant_type: 'refresh_token', refresh_token: legacy.refreshToken, client_id: legacy.clientId } });
     assertEqual(refreshed.status, 200, `a /mcp refresh token renews (${refreshed.text})`);
     assertEqual((await mcpToolsList(base, '/mcp', { authorization: `Bearer ${refreshed.body.access_token}` })).status, 200, 'the renewed token opens /mcp');
-    ok('migration: the old canvas and export directory become board main; /mcp tokens keep working; a token for board A is rejected on /b/B/mcp');
+    ok('the boards page (HTML for browsers, JSON otherwise); migration: the old canvas and export directory become board main; /mcp tokens keep working; a token for board A is rejected on /b/B/mcp');
   } finally {
     await gateway.stop();
     await github.close();
