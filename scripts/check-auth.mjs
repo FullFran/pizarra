@@ -767,7 +767,8 @@ async function checkRealServerFlow(github) {
     const asset = await request(base, { path: '/server.js' });
     assertEqual(asset.status, 302, 'static files without a session');
     const pageWithSession = await request(base, { path: '/', headers: cookie });
-    assert(pageWithSession.status === 200 || pageWithSession.status === 404, `canvas page with a session is served (got ${pageWithSession.status})`);
+    assertEqual(pageWithSession.status, 302, 'canvas page with a session moves to the main board page');
+    assertEqual(pageWithSession.headers.location, '/b/main/', 'canvas page with a session goes to /b/main/');
 
     assertEqual((await request(base, { path: '/api/elements' })).status, 401, '/api/elements without credentials');
     assertEqual((await request(base, { path: '/api/elements', headers: { authorization: 'Bearer nope' } })).status, 401, '/api/elements with a bad token');
@@ -932,7 +933,7 @@ async function checkProxyTopology({ base, port, internalPort, jar, bearer, cooki
   ok('proxied cookie writes need our Origin for every /API case variant, method and Origin; encoded/dot-segment paths refused');
 
   // The canvas UI is proxied with a session; credentials never reach upstream.
-  const page = await request(base, { path: '/', headers: cookie });
+  const page = await request(base, { path: '/b/main/', headers: cookie });
   assertEqual(page.status, 200, 'canvas page through the proxy');
   assert(/<html/i.test(page.text), 'canvas page is the upstream frontend');
   assert(!page.headers['set-cookie'], 'the proxy forwards no upstream cookies');
