@@ -151,12 +151,18 @@ export const BOARD_SCRIPT = `(() => {
   const badge = () => {
     const bar = document.createElement('div');
     bar.setAttribute('data-pizarra-chrome', '');
-    bar.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,.92);border:1px solid #d9d9de;font:12px system-ui,sans-serif;color:#1d1d1f';
+    bar.style.cssText = 'position:fixed;left:16px;bottom:64px;z-index:2147483647;display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,.92);border:1px solid #d9d9de;font:12px system-ui,sans-serif;color:#1d1d1f';
     const name = document.createElement('a');
     name.href = '/boards';
     name.textContent = script.dataset.name || board;
+    name.title = 'All your boards';
     name.style.cssText = 'color:inherit;font-weight:600;text-decoration:none';
     bar.appendChild(name);
+    const all = document.createElement('a');
+    all.href = '/boards';
+    all.textContent = 'Boards';
+    all.style.cssText = 'color:#6965db;text-decoration:none';
+    bar.appendChild(all);
     if (script.dataset.signout === '1') {
       const form = document.createElement('form');
       form.method = 'post';
