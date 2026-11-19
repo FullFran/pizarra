@@ -4,7 +4,7 @@ import type { IncomingMessage, OutgoingHttpHeaders } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { AuthInfo, McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../../../shared/logger.js';
-import { DEFAULT_BOARD, parseBoardPath } from '../../domain/board-path.js';
+import { ALL_BOARDS_MCP_PATH, DEFAULT_BOARD, parseBoardPath } from '../../domain/board-path.js';
 import { isPlainPath, isSafeMethod, isSameOrigin } from '../../domain/request-policy.js';
 import { agentRequestVerdict } from '../../domain/agent-policy.js';
 import { viewerRequestVerdict } from '../../domain/viewer-policy.js';
@@ -12,6 +12,8 @@ import { AccessGate } from '../../application/access-gate.js';
 import type { BoardDirectory, BoardRole, CanvasUpstream, Principal, RequestAuthenticator } from '../../application/ports.js';
 import type { CanvasProxy } from '../../infrastructure/canvas-proxy.js';
 import { dropDataFrames } from '../../infrastructure/websocket-filter.js';
+import { allBoardsMcpFactory } from '../../infrastructure/all-boards-mcp.js';
+import type { BoardToolkit } from '../../infrastructure/upstream-mcp.js';
 import { AGENT_SCRIPT, AGENT_SCRIPT_PATH } from '../../../agent/panel.js';
 import { BOARD_SCRIPT, BOARD_SCRIPT_PATH, fetchBoardPage, injectBoardScript } from './board-page.js';
 import { BOARDS_PAGE_CSP, BOARDS_SCRIPT, BOARDS_SCRIPT_PATH, boardsPageHtml } from './boards-page.js';
@@ -22,6 +24,7 @@ import type { SessionCheck } from './responses.js';
 
 /** Identity provider id of the agent's engine tokens. */
 const ENGINE_PROVIDER = 'engine';
+const GITHUB_PROVIDER = 'github';
 /** Where each board's agent routes live inside the board (`/b/<id>/__agent/...`, `/__agent/...` for main). */
 const AGENT_PATH = '/__agent';
 
@@ -58,6 +61,8 @@ export interface GatewayAppOptions {
   auth?: GatewayAuth;
   /** Upstream's MCP server factory for a board. */
   mcpFactoryFor: (board: string) => Promise<McpServerFactory>;
+  /** A board's own copy of upstream's tools; enables the all-boards MCP at `/boards/mcp`. */
+  boardToolkit?: (board: string) => Promise<BoardToolkit>;
   boards: BoardDirectory;
   upstream: CanvasUpstream;
   proxy: CanvasProxy;
@@ -225,6 +230,64 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     res.locals.board = board;
     next();
   }, mcpRouter);
+
+  // ---- MCP over every board the caller can open: /boards/mcp ----
+  const { boardToolkit } = options;
+  if (boardToolkit) {
+    const allBoardsAuth: RequestHandler = async (req, res, next) => {
+      if (!auth) return next();
+      try {
+        await auth.authenticator.prepare?.(gateHeaders(req));
+      } catch (error) {
+        return next(error);
+      }
+      // Not wrapped in agent.withConnection: engine tokens never open this endpoint.
+      const result = auth.authenticator.authenticate(gateHeaders(req), { resource: [`${auth.authenticator.origin}${ALL_BOARDS_MCP_PATH}`], acceptSession: false });
+      if (!result.ok) {
+        res.setHeader('WWW-Authenticate', result.challenge);
+        res.status(result.status).json({ error: result.error });
+        return;
+      }
+      const principal = result.principal;
+      // Only a GitHub account's own OAuth token: never an issuer's ticket or a board-scoped credential.
+      if (principal.provider !== GITHUB_PROVIDER || principal.via !== 'bearer' || principal.issuer !== undefined || principal.board !== undefined) {
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      res.locals.principal = principal;
+      const authInfo: AuthInfo = {
+        token: principal.token ?? '',
+        clientId: principal.clientId ?? '',
+        scopes: principal.scopes,
+        ...(principal.expiresAt !== undefined ? { expiresAt: principal.expiresAt } : {}),
+        ...(principal.resource ? { resource: new URL(principal.resource) } : {}),
+        extra: { login: principal.login, provider: principal.provider }
+      };
+      res.locals[MCP_AUTH_INFO_LOCAL] = authInfo;
+      next();
+    };
+    const { router: allBoardsRouter } = createMcpHttpRouter({
+      factoryFor: async res => {
+        const principal = res.locals.principal as Principal | undefined;
+        // Issuer boards are opened by their issuer's tickets only, never through this endpoint.
+        const github = (board: string) => {
+          const summary = boards.summary(board, principal);
+          return summary && summary.kind === 'github' ? summary : undefined;
+        };
+        return allBoardsMcpFactory({
+          list: () => boards.list(principal).filter(board => board.kind === 'github'),
+          roleOn: board => github(board)?.role,
+          toolkit: boardToolkit,
+          tools: (await boardToolkit(DEFAULT_BOARD)).tools
+        });
+      },
+      logger,
+      bindHost: options.bindHost,
+      ...(options.publicBaseUrl ? { publicBaseUrl: options.publicBaseUrl } : {}),
+      authMiddleware: [allBoardsAuth]
+    });
+    app.use(ALL_BOARDS_MCP_PATH, allBoardsRouter);
+  }
 
   // ---- Boards API: list, create (admins), members (owners) ----
   const json = express.json({ limit: '16kb' });

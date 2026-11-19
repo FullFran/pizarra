@@ -310,12 +310,88 @@ async function checkInvitesAndViewers() {
   }
 }
 
+async function checkAllBoardsMcp() {
+  const github = await startFakeGitHub();
+  const port = await freePort();
+  const gateway = await startGateway(scratch, githubEnv(port, github.url, join(scratch, 'all-boards'), { PORT: String(port) }));
+  const { base } = gateway;
+  try {
+    const admin = await githubLogin(base, github, 'FullFran');
+    const adminCookie = { cookie: cookieHeader(admin.jar), origin: base };
+    for (const id of ['alpha', 'beta']) await request(base, { method: 'POST', path: '/boards', headers: adminCookie, json: { id, name: `${id} board` } });
+    await request(base, { method: 'PUT', path: '/b/alpha/members/alice', headers: adminCookie, json: { role: 'editor' } });
+    await request(base, { method: 'PUT', path: '/b/beta/members/bob', headers: adminCookie, json: { role: 'viewer' } });
+
+    // Its own protected resource, named on the consent page.
+    const prm = await request(base, { path: '/.well-known/oauth-protected-resource/boards/mcp' });
+    assertEqual(prm.body?.resource, `${base}/boards/mcp`, 'the all-boards protected resource metadata');
+    const anonymous = await mcpToolsList(base, '/boards/mcp');
+    assertEqual(anonymous.status, 401, '/boards/mcp without a token');
+    assert(anonymous.headers['www-authenticate']?.includes(`${base}/.well-known/oauth-protected-resource/boards/mcp`), `the challenge points at its metadata (${anonymous.headers['www-authenticate']})`);
+
+    const alice = await githubLogin(base, github, 'alice');
+    const aliceAll = await obtainToken(base, alice.jar, `${base}/boards/mcp`);
+    assert(aliceAll.accessToken && aliceAll.page.text.includes('All your boards'), 'the consent page names all your boards');
+    const aliceBearer = { authorization: `Bearer ${aliceAll.accessToken}` };
+
+    const tools = (await mcpToolsList(base, '/boards/mcp', aliceBearer)).result?.result?.tools ?? [];
+    assert(tools.some(t => t.name === 'list_boards'), 'list_boards is offered');
+    const create = tools.find(t => t.name === 'create_element');
+    assert(create && create.inputSchema.required.includes('board') && create.inputSchema.properties.board, 'every upstream tool takes a required board argument');
+
+    const listed = await mcpCall(base, '/boards/mcp', 'list_boards', {}, aliceBearer);
+    const aliceBoards = JSON.parse(listed.result?.result?.content?.[0]?.text ?? '{}').boards;
+    assertEqual(JSON.stringify(aliceBoards), '[{"id":"alpha","name":"alpha board","role":"editor"}]', 'list_boards: only the boards this account can open, with its role');
+    const adminAll = await obtainToken(base, admin.jar, `${base}/boards/mcp`);
+    const adminBearer = { authorization: `Bearer ${adminAll.accessToken}` };
+    const adminBoards = JSON.parse((await mcpCall(base, '/boards/mcp', 'list_boards', {}, adminBearer)).result?.result?.content?.[0]?.text ?? '{}').boards;
+    assertEqual(JSON.stringify(adminBoards.map(b => [b.id, b.role])), '[["alpha","owner"],["beta","owner"],["main","owner"]]', 'an admin lists every GitHub board');
+
+    // A call goes to the named board, and only to it.
+    const drawn = await mcpCall(base, '/boards/mcp', 'create_element', { board: 'alpha', ...element('all-alice') }, aliceBearer);
+    assert(drawn.result?.result && !drawn.result.result.isError, `an editor draws on alpha through /boards/mcp (${drawn.text.slice(0, 200)})`);
+    assertEqual((await request(base, { path: '/b/alpha/api/elements/all-alice', headers: adminCookie })).status, 200, 'the element is on alpha');
+    assertEqual((await request(base, { path: '/b/beta/api/elements/all-alice', headers: adminCookie })).status, 404, 'and not on beta');
+    for (const board of ['beta', 'main', 'nope', '../alpha']) {
+      const refused = await mcpCall(base, '/boards/mcp', 'create_element', { board, ...element(`stray-${board.length}`) }, aliceBearer);
+      assert(refused.result?.result?.isError && /Board not found/.test(refused.text), `a board alice cannot open (${board}) answers as missing (${refused.text.slice(0, 200)})`);
+    }
+    assertEqual((await request(base, { path: '/b/beta/api/elements/stray-4', headers: adminCookie })).status, 404, 'nothing was drawn on beta');
+    const noBoard = await mcpCall(base, '/boards/mcp', 'create_element', element('no-board'), aliceBearer);
+    assert(noBoard.status >= 400 || noBoard.result?.error || noBoard.result?.result?.isError, `a call without board is refused (${noBoard.text.slice(0, 200)})`);
+
+    // A viewer reads through it and never writes.
+    const bob = await githubLogin(base, github, 'bob');
+    const bobBearer = { authorization: `Bearer ${(await obtainToken(base, bob.jar, `${base}/boards/mcp`)).accessToken}` };
+    const bobWrite = await mcpCall(base, '/boards/mcp', 'create_element', { board: 'beta', ...element('by-bob') }, bobBearer);
+    assert(bobWrite.result?.result?.isError && /only view/.test(bobWrite.text), `a viewer cannot write (${bobWrite.text.slice(0, 200)})`);
+    assertEqual((await request(base, { path: '/b/beta/api/elements/by-bob', headers: adminCookie })).status, 404, 'the viewer write did not happen');
+    const bobRead = await mcpCall(base, '/boards/mcp', 'query_elements', { board: 'beta' }, bobBearer);
+    assert(bobRead.result?.result && !bobRead.result.result.isError, `a viewer reads (${bobRead.text.slice(0, 200)})`);
+
+    // Audiences stay apart: a board token never opens /boards/mcp, nor the reverse.
+    const alphaToken = await obtainToken(base, alice.jar, `${base}/b/alpha/mcp`);
+    assertEqual((await mcpToolsList(base, '/boards/mcp', { authorization: `Bearer ${alphaToken.accessToken}` })).status, 401, 'a board token is rejected on /boards/mcp');
+    assertEqual((await mcpToolsList(base, '/b/alpha/mcp', aliceBearer)).status, 401, 'an all-boards token is rejected on /b/alpha/mcp');
+    assertEqual((await mcpToolsList(base, '/mcp', aliceBearer)).status, 401, 'and on /mcp');
+
+    // Removal: the call checks the role then; with no board left the token stops working.
+    await request(base, { method: 'DELETE', path: '/b/alpha/members/alice', headers: adminCookie });
+    assertEqual((await mcpToolsList(base, '/boards/mcp', aliceBearer)).status, 401, 'an account with no board left loses the all-boards token');
+    ok('/boards/mcp: one token for every board you can open; list_boards, a required board argument, per-call role (missing boards hidden, viewers read only), audiences kept apart, removal ends access');
+  } finally {
+    await gateway.stop();
+    await github.close();
+  }
+}
+
 try {
   console.log(`Board checks (scratch: ${scratch})`);
   await checkTwoBoards();
   await checkIdleAndCap();
   await checkMigrationAndAuth();
   await checkInvitesAndViewers();
+  await checkAllBoardsMcp();
   console.log(`Board check passed: ${passed} groups.`);
 } catch (error) {
   console.error(`Board check failed after ${passed} groups: ${error.stack || error.message}`);
