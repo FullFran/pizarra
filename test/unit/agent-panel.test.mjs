@@ -4,13 +4,38 @@ import vm from 'node:vm';
 import { BOARD_SCRIPT, injectBoardScript } from '../../dist/gateway/presentation/http/board-page.js';
 import { AGENT_SCRIPT, AGENT_SCRIPT_PATH } from '../../dist/agent/panel.js';
 
+/** A style that behaves like the browser's: assigning cssText replaces every declaration. */
+function fakeStyle() {
+  const decl = new Map();
+  const kebab = key => key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+  return new Proxy({}, {
+    get(_, key) {
+      if (key === 'cssText') return [...decl].map(([name, value]) => `${name}:${value}`).join(';');
+      if (key === 'setProperty') return (name, value) => decl.set(name, String(value));
+      if (key === 'getPropertyValue') return name => decl.get(name) ?? '';
+      return typeof key === 'string' ? decl.get(kebab(key)) ?? '' : undefined;
+    },
+    set(_, key, value) {
+      if (key === 'cssText') {
+        decl.clear();
+        for (const part of String(value).split(';')) {
+          const at = part.indexOf(':');
+          if (at > 0) decl.set(part.slice(0, at).trim(), part.slice(at + 1).trim());
+        }
+      } else if (value === '' || value == null) decl.delete(kebab(key));
+      else decl.set(kebab(key), String(value));
+      return true;
+    },
+  });
+}
+
 /** A tiny DOM: enough for the scripts, and it keeps everything they build inspectable. */
 class FakeNode {
   constructor(tag) {
     this.tagName = tag.toUpperCase();
     this.children = [];
     this.attrs = {};
-    this.style = { cssText: '' };
+    this.style = fakeStyle();
     this.listeners = {};
     this.parent = null;
     this.own = '';
@@ -239,4 +264,17 @@ test('the verification link is rendered only for the fixed address', async () =>
   const bad = await run('https://auth.openai.com.evil.test/codex/device');
   assert.equal(bad.nodes().some(n => n.tagName === 'A' && n.attrs.href !== undefined), false);
   assert.ok(bad.body.textContent.includes('ABCD-1234'));
+});
+
+test('the Agent button opens the panel and a theme repaint keeps it open', async () => {
+  const p = page({ status: connected });
+  await settle();
+  const toggle = p.find('BUTTON', 'Agent');
+  const panel = toggle.parent.children[0];
+  assert.equal(panel.style.display, 'none');
+  toggle.fire('click');
+  assert.equal(toggle.attrs['aria-expanded'], 'true');
+  assert.equal(panel.style.display, 'flex', 'the panel is visible after a click');
+  toggle.fire('click');
+  assert.equal(panel.style.display, 'none', 'a second click closes it');
 });

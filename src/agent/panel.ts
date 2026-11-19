@@ -117,8 +117,13 @@ export const AGENT_SCRIPT = String.raw`(() => {
     if (document.querySelector('.excalidraw')) return false;
     return Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   };
-  const paint = () => { const vars = isDark() ? DARK : LIGHT; for (const entry of themed) entry.node.style.cssText = vars + entry.css; };
-  const themedBox = (node, css) => { themed.push({ node, css }); paint(); return node; };
+  // Only the colour variables change with the theme: rewriting cssText would undo every
+  // display the panel set since (the open panel, the drawing badge).
+  const paint = () => {
+    const vars = (isDark() ? DARK : LIGHT).split(';').filter(Boolean).map(pair => pair.split(':'));
+    for (const node of themed) for (const [name, value] of vars) node.style.setProperty(name, value);
+  };
+  const themedBox = (node, css) => { node.style.cssText = css; themed.push(node); paint(); return node; };
   const whenBody = fn => { if (document.body) fn(); else document.addEventListener('DOMContentLoaded', fn); };
   if (typeof MutationObserver === 'function') {
     whenBody(() => new MutationObserver(paint).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] }));
@@ -135,9 +140,7 @@ export const AGENT_SCRIPT = String.raw`(() => {
       }
       const working = state === 'working';
       badge.textContent = (typeof login === 'string' && login ? login : 'The agent') + ' is drawing…';
-      const entry = themed.find(item => item.node === badge);
-      entry.css = entry.css.replace(/display:[a-z]+/, 'display:' + (working ? 'block' : 'none'));
-      paint();
+      badge.style.display = working ? 'block' : 'none';
     });
   };
 
