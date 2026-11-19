@@ -301,3 +301,22 @@ test('manager: close stops every process and refuses new work', async () => {
   assert.equal(manager.liveCount(), 0);
   assert.throws(() => manager.prompt('fullfran', 'b1', 'draw', collect().sink), error => error.code === 'engine_unavailable');
 });
+
+test('manager: the model list comes from the engine, and a turn carries the choice and reports what it used', async t => {
+  const { manager, vault } = setup();
+  t.after(() => manager.close());
+  await assert.rejects(manager.models('fullfran', 'b1'), error => error instanceof EngineError && error.code === 'not_connected');
+  await manager.startLogin('fullfran', 'b1');
+  for (let i = 0; i < 50 && !vault.read('fullfran'); i += 1) await new Promise(resolve => setTimeout(resolve, 20));
+
+  const [first, second] = await Promise.all([manager.models('fullfran', 'b1'), manager.models('fullfran', 'b1')]);
+  assert.deepEqual(first, [
+    { id: 'gpt-fake-a', name: 'Fake A', levels: ['off', 'low', 'high'] },
+    { id: 'gpt-fake-b', name: 'gpt-fake-b', levels: ['off'] },
+  ], 'levels in pi\'s order; a name that is not plain text becomes the id');
+  assert.deepEqual(second, first, 'two callers share one request');
+
+  const { events, sink } = collect();
+  await manager.prompt('fullfran', 'b1', 'choice', sink, { model: 'gpt-fake-b', thinking: 'max' });
+  assert.deepEqual(events, [['settings', { model: 'gpt-fake-b', thinking: 'high' }], ['done', { aborted: false }]], 'the choice reaches the engine; a malformed settings line is dropped');
+});

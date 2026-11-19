@@ -68,6 +68,31 @@ export function parseCredential(value: unknown): StoredCredential | null {
 /** A model id as the provider names it. Strict, so an id is never text. */
 export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
+/** Pi's thinking levels, lowest first. A model supports some of them; pi clamps the rest. */
+export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type ThinkingLevel = typeof THINKING_LEVELS[number];
+export const isThinkingLevel = (value: unknown): value is ThinkingLevel => (THINKING_LEVELS as readonly unknown[]).includes(value);
+
+/** One model of the person's account, as the panel offers it. */
+export interface ModelInfo {
+  id: string;
+  /** The provider's display name; the id when the name is not plain text. */
+  name: string;
+  /** The thinking levels this model supports, lowest first; `['off']` without reasoning. */
+  levels: ThinkingLevel[];
+}
+
+const MODEL_NAME = /^[\x20-\x7E]{1,64}$/;
+const MAX_MODELS = 64;
+
+function parseModelInfo(value: unknown): ModelInfo | null {
+  const m = value as Record<string, unknown> | null;
+  if (typeof m !== 'object' || m === null || typeof m.id !== 'string' || !MODEL_ID.test(m.id)) return null;
+  if (!Array.isArray(m.levels) || m.levels.length === 0 || !m.levels.every(isThinkingLevel)) return null;
+  const levels = THINKING_LEVELS.filter(level => (m.levels as unknown[]).includes(level));
+  return { id: m.id, name: typeof m.name === 'string' && MODEL_NAME.test(m.name) ? m.name : m.id, levels };
+}
+
 /**
  * One shape the agent is drawing, as the browser previews it before the tool runs. Only plain
  * drawing properties survive: no ids, bindings, links, files or custom data.
@@ -147,7 +172,9 @@ export type ParentMessage =
   | { type: 'login.cancel' }
   | { type: 'refresh'; id: string; credential: StoredCredential }
   | { type: 'token'; id: string; access?: string; accountId?: string; expires?: number; error?: EngineErrorCode }
-  | { type: 'prompt'; text: string; model?: string }
+  | { type: 'prompt'; text: string; model?: string; thinking?: ThinkingLevel }
+  /** Lists the account's models (allowlist applied); answered by `models` or `models.failed`. */
+  | { type: 'models' }
   | { type: 'reset' }
   | { type: 'abort' }
   | { type: 'shutdown' };
@@ -188,7 +215,11 @@ export type ChildMessage =
   | DraftMessage
   | { type: 'done'; aborted: boolean }
   | { type: 'error'; code: EngineErrorCode }
-  | { type: 'reset.done' };
+  | { type: 'reset.done' }
+  | { type: 'models'; models: ModelInfo[] }
+  | { type: 'models.failed'; code: EngineErrorCode }
+  /** The model and thinking level a turn actually runs with, after the allowlist and clamping. */
+  | { type: 'settings'; model: string; thinking: ThinkingLevel };
 
 export function encode(message: ParentMessage | ChildMessage): string {
   return `${JSON.stringify(message)}\n`;
@@ -245,6 +276,16 @@ export function parseChildMessage(value: unknown): ChildMessage | null {
       return { type: 'error', code: toErrorCode(m.code) };
     case 'reset.done':
       return { type: 'reset.done' };
+    case 'models': {
+      if (!Array.isArray(m.models) || m.models.length > MAX_MODELS) return null;
+      const models = m.models.map(parseModelInfo);
+      return models.every((model): model is ModelInfo => model !== null) ? { type: 'models', models } : null;
+    }
+    case 'models.failed':
+      return { type: 'models.failed', code: toErrorCode(m.code, 'engine_unavailable') };
+    case 'settings':
+      return typeof m.model === 'string' && MODEL_ID.test(m.model) && isThinkingLevel(m.thinking)
+        ? { type: 'settings', model: m.model, thinking: m.thinking } : null;
     default:
       return null;
   }

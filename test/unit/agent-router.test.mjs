@@ -369,3 +369,25 @@ test('the main board page at / redirects to /b/main/ so it gets the board and ag
   const api = await call(ctx, 'GET', '/api/elements');
   assert.notEqual(api.status, 302, 'unprefixed API paths still go to the main board');
 });
+
+test('models and the turn choice: listed for allowlisted editors, validated, carried to the engine', async t => {
+  const ctx = await start();
+  t.after(ctx.close);
+  const early = await call(ctx, 'POST', '/b/b1/__agent/models', { body: {} });
+  assert.equal(early.status, 409);
+  assert.deepEqual(early.json(), { error: 'not_connected' });
+  ctx.vault.write('fullfran', credential);
+  const listed = await call(ctx, 'POST', '/b/b1/__agent/models', { body: {} });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.json().models.map(m => m.id), ['gpt-fake-a', 'gpt-fake-b']);
+  assert.equal((await call(ctx, 'POST', '/b/b1/__agent/models', { body: {}, session: 'stranger' })).status, 404, 'only for allowlisted editors');
+  assert.equal((await call(ctx, 'POST', '/b/b1/__agent/models', { body: {}, origin: 'https://evil.test' })).status, 403, 'our Origin only');
+
+  for (const bad of [{ model: 'no spaces allowed' }, { model: 7 }, { thinking: 'extreme' }, { thinking: 1 }]) {
+    const refused = await call(ctx, 'POST', '/b/b1/__agent/prompt', { body: { text: 'choice', ...bad } });
+    assert.equal(refused.status, 400, JSON.stringify(bad));
+    assert.equal(refused.json().error, 'invalid_request');
+  }
+  const turn = await call(ctx, 'POST', '/b/b1/__agent/prompt', { body: { text: 'choice', model: 'gpt-fake-a', thinking: 'low' } });
+  assert.deepEqual(parseSse(turn.text), [['settings', { model: 'gpt-fake-a', thinking: 'low' }], ['done', { aborted: false }]]);
+});

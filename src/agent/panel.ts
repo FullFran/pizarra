@@ -22,6 +22,10 @@ export const AGENT_SCRIPT = String.raw`(() => {
   const DRAFT = 'pizarra-draft-';
   const DEVICE_URI = 'https://auth.openai.com/codex/device';
   const CODE = /^[A-Z0-9][A-Z0-9-]{2,18}[A-Z0-9]$/;
+  // THINKING_LEVELS of protocol.ts, lowest first (a unit test keeps them equal).
+  const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const CHOICE_KEY = 'pizarra.agent.choice';
+  const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
   const COLOR = /^(#[0-9A-Fa-f]{3,8}|[a-z]{3,20}|transparent)$/;
   const num = (value, fallback) => (typeof value === 'number' && isFinite(value) ? value : fallback);
   const color = (value, fallback) => (typeof value === 'string' && COLOR.test(value) ? value : fallback);
@@ -234,6 +238,15 @@ export const AGENT_SCRIPT = String.raw`(() => {
     const input = themedBox(h('textarea'), 'font:inherit;box-sizing:border-box;width:100%;resize:vertical;border:1px solid var(--pz-border);border-radius:6px;padding:6px;background:var(--pz-field);color:var(--pz-fg)');
     input.setAttribute('rows', '2');
     input.setAttribute('placeholder', 'Ask the agent to draw… (Enter sends, Shift+Enter new line)');
+    // Model and thinking: the account's models, each with the levels it supports.
+    const choiceRow = h('div', 'display:none;gap:6px;align-items:center;font-size:12px');
+    const selectCss = 'font:inherit;min-width:0;border:1px solid var(--pz-border);border-radius:6px;padding:2px 4px;background:var(--pz-field);color:var(--pz-fg)';
+    const modelSelect = themedBox(h('select'), selectCss + ';flex:1');
+    modelSelect.setAttribute('aria-label', 'Model');
+    const thinkingSelect = themedBox(h('select'), selectCss);
+    thinkingSelect.setAttribute('aria-label', 'Thinking');
+    choiceRow.appendChild(modelSelect);
+    choiceRow.appendChild(thinkingSelect);
     const actions = h('div', 'display:flex;gap:8px;align-items:center');
     const send = button('Send');
     const stop = button('Stop');
@@ -243,6 +256,7 @@ export const AGENT_SCRIPT = String.raw`(() => {
     const spacer = h('span', 'flex:1');
     for (const node of [send, stop, spacer, reset, signOut]) actions.appendChild(node);
     signedIn.appendChild(log);
+    signedIn.appendChild(choiceRow);
     signedIn.appendChild(input);
     signedIn.appendChild(actions);
 
@@ -252,11 +266,64 @@ export const AGENT_SCRIPT = String.raw`(() => {
     root.appendChild(toggle);
     document.body.appendChild(root);
 
+    let models = [];
+    let modelsLoading = false;
+    const readChoice = () => {
+      try {
+        const value = JSON.parse(window.localStorage.getItem(CHOICE_KEY) || '{}');
+        return value && typeof value === 'object' ? value : {};
+      } catch { return {}; }
+    };
+    const saveChoice = () => {
+      try { window.localStorage.setItem(CHOICE_KEY, JSON.stringify({ model: modelSelect.value, thinking: thinkingSelect.value })); } catch { /* no storage: the choice lasts this page */ }
+    };
+    const option = (value, label) => { const node = h('option', '', label); node.value = value; return node; };
+    /** Like pi: a level the model lacks becomes the nearest one above it, else below. */
+    const clampLevel = (levels, wanted) => {
+      if (levels.includes(wanted)) return wanted;
+      const at = LEVELS.indexOf(wanted);
+      if (at === -1) return levels.includes('medium') ? 'medium' : levels[levels.length - 1];
+      return LEVELS.slice(at).find(level => levels.includes(level)) || LEVELS.slice(0, at).reverse().find(level => levels.includes(level)) || levels[0];
+    };
+    const fillThinking = wanted => {
+      const model = models.find(m => m.id === modelSelect.value);
+      const levels = model ? model.levels : ['off'];
+      thinkingSelect.textContent = '';
+      for (const level of levels) thinkingSelect.appendChild(option(level, level === 'off' ? 'No thinking' : 'Thinking: ' + level));
+      thinkingSelect.value = clampLevel(levels, wanted);
+      thinkingSelect.disabled = levels.length <= 1;
+    };
+    const showModels = list => {
+      models = list;
+      modelSelect.textContent = '';
+      for (const model of models) modelSelect.appendChild(option(model.id, model.name));
+      const saved = readChoice();
+      modelSelect.value = models.some(m => m.id === saved.model) ? saved.model : models[0].id;
+      fillThinking(typeof saved.thinking === 'string' ? saved.thinking : 'medium');
+      choiceRow.style.display = 'flex';
+    };
+    const loadModels = async () => {
+      if (models.length > 0 || modelsLoading) return;
+      modelsLoading = true;
+      try {
+        const response = await post('models');
+        const value = response.ok ? await response.json() : null;
+        const list = value && Array.isArray(value.models) ? value.models.filter(m => m && typeof m.id === 'string' && MODEL.test(m.id) && typeof m.name === 'string'
+          && Array.isArray(m.levels) && m.levels.length > 0 && m.levels.every(level => LEVELS.includes(level))) : [];
+        if (list.length > 0) showModels(list);
+      } catch { /* no list: turns use the account's first model */ } finally {
+        modelsLoading = false;
+      }
+    };
+    modelSelect.addEventListener('change', () => { fillThinking(thinkingSelect.value); saveChoice(); });
+    thinkingSelect.addEventListener('change', saveChoice);
+
     const note = text => { log.appendChild(h('div', 'color:#c0392b;font-size:12px', text)); log.scrollTop = log.scrollHeight; };
     const showConnected = connected => {
       signedOut.style.display = connected ? 'none' : 'flex';
       signedIn.style.display = connected ? 'flex' : 'none';
       paint();
+      if (connected) void loadModels();
     };
 
     // Device-code login
@@ -345,6 +412,10 @@ export const AGENT_SCRIPT = String.raw`(() => {
             const row = calls.get(data.call) || add('color:var(--pz-dim);font-size:12px');
             row.textContent = data.ok === true ? did : doing + ' failed';
           }
+        } else if (event === 'settings' && models.some(m => m.id === data.model)) {
+          // What the turn really runs with (allowlist, clamping); the saved choice stays.
+          modelSelect.value = data.model;
+          fillThinking(data.thinking);
         } else if (event === 'error') {
           current = null;
           note(errorText(data.code));
@@ -391,7 +462,7 @@ export const AGENT_SCRIPT = String.raw`(() => {
       add('font-weight:600;white-space:pre-wrap;overflow-wrap:anywhere', text);
       setRunning(true);
       try {
-        const response = await window.fetch(base + '/prompt', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+        const response = await window.fetch(base + '/prompt', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(models.length > 0 ? { text, model: modelSelect.value, thinking: thinkingSelect.value } : { text }) });
         const type = (response.headers && response.headers.get('content-type')) || '';
         if (!response.ok || !/text\/event-stream/.test(type)) {
           let code = 'provider_error';
