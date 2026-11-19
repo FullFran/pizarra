@@ -59,7 +59,10 @@ All under `/b/<board>/__agent/` (the board must be open to you).
   with the login as associated data, so a file under another name does not decrypt). The refresh
   token rotates; the gateway is the only place that refreshes it, one refresh at a time per person.
 - One engine process per person and board, with an empty working directory, `HOME` and `TMPDIR`
-  of its own, and an environment of `PATH` only. Idle processes stop after 5 minutes, every process
+  of its own, and an environment of `PATH`, `HOME` and `TMPDIR` only. This is not a sandbox: the
+  engine runs as the gateway's user, so code running inside it could read the gateway's
+  environment (`/proc/<ppid>/environ`, including `PIZARRA_AGENT_KEY`) and the vault files. pi's
+  built-in shell and file tools are off; a separate user for engines would close the rest. Idle processes stop after 5 minutes, every process
   after 1 hour; one turn lasts at most 10 minutes and 2 MiB of text; one device login is pending
   per person for at most 15 minutes, at most 3 starts per 15 minutes.
 - Engine tokens (`pze_...`) are random, held as a hash in memory, bound to one person and board,
@@ -68,7 +71,10 @@ All under `/b/<board>/__agent/` (the board must be open to you).
   their own board. Everything else (REST API, pages, the agent routes, other boards) refuses them.
   A reverse proxy on the same host that adds none of the usual forwarding headers
   (`X-Forwarded-*`, `Forwarded`, `Via`, `X-Real-IP`, ...) cannot be told from the engine: do not
-  run one that does.
+  run one that does. nginx's defaults are such a proxy (`proxy_pass http://127.0.0.1:<PORT>` sends
+  `Host: 127.0.0.1:<PORT>` and no forwarding header): set `proxy_set_header Host $host` and
+  `X-Forwarded-For`. A proxy in another container connects from a non-loopback address and is not
+  affected.
 - On `/mcp`, an engine's `tools/call` outside `AGENT_TOOLS` is refused with 403: no `clear_canvas`,
   `import_scene`, `restore_snapshot`, `export_*` or `set_viewport`. The gateway also stops an
   engine that announces a tool outside that list. `tools/list` is not filtered; the engine restricts itself.

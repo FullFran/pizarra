@@ -12,12 +12,12 @@ Branch: `feat/agent-panel`. Prototype behind `PIZARRA_AGENT=1` and an allowlist 
 
 ## Tasks
 
-- [ ] T0 (S5) inline: shared protocol `src/agent/protocol.ts`.
-- [ ] T1 (S1, S2, S5) delegated writer, parallel: engine program `engine/` (pi session, device login, MCP, text/thinking/tool/draft events) and its Docker stage.
-- [ ] T2 (S1, S4, S5) delegated writer, parallel: gateway host `src/agent/` (manager, vault, engine tokens + identity plugin, allowlist, tool policy on /mcp, HTTP/SSE routes, config).
-- [ ] T3 (S2, S3) delegated writer, parallel: browser `src/agent/panel.ts` (panel, narration, draft rendering) and `BOARD_SCRIPT` changes.
-- [ ] T4 (S1-S5) inline: wiring in `app.ts`, seam check (`npm test`), docs, independent verification (security: credentials, auth plugin).
-- [ ] T5 (S1) Fran: real device login with his account and a live drawing turn.
+- [x] T0 (S5) inline: shared protocol `src/agent/protocol.ts`. Commit a1ef1ad.
+- [x] T1 (S1, S2, S5) delegated writer, parallel: engine program `engine/` (pi session, device login, MCP, text/thinking/tool/draft events) and its Docker stage. Commit e55624d.
+- [x] T2 (S1, S4, S5) delegated writer, parallel: gateway host `src/agent/` (manager, vault, engine tokens + identity plugin, allowlist, tool policy on /mcp, HTTP/SSE routes, config). Commit 81fb31a.
+- [x] T3 (S2, S3) delegated writer, parallel: browser `src/agent/panel.ts` (panel, narration, draft rendering) and `BOARD_SCRIPT` changes. Commit 6847379.
+- [x] T4 (S1-S5) inline: wiring in `app.ts`, seam check (`npm test`), docs, independent verification (security: credentials, auth plugin). Wiring in 81fb31a; docs fix in the next commit.
+- [ ] T5 (S1) Fran: real device login with their account and a live drawing turn.
 
 Route evidence: T1-T3 are independent units with disjoint edit surfaces launched together (Writer trigger a); T0/T4 inline.
 
@@ -28,3 +28,4 @@ Route evidence: T1-T3 are independent units with disjoint edit surfaces launched
 - L3 (2026-11-19): Prior art. tldraw agent starter kit (MIT) streams typed actions and applies each when complete; excalidraw-mcp streams in the chat host via `ontoolinputpartial`. pi-ai emits `toolcall_delta` with partial parsed arguments (Gemini sends them at once). OpenAI's plan-usage sign-in targets local/OSS apps; hosted apps go to an interest form.
 - L4 (2026-11-19): Pizarra map. Identity is the GitHub login only (no email). No internal bearer exists; an engine identity plugin bound to one board, loopback only, is the chosen way. Upstream broadcasts `element_created`/`elements_batch_created` to every viewer, so real elements need no WS injection; drafts go over a gateway SSE channel. Runtime image is alpine with nodejs, no npm.
 - L5 (2026-11-19, user, verbatim): "si! me vale mi cuenta es la de [email] de todas formas pizarra lo tengo abierto a muy poca gente." (email redacted; Pizarra keys on GitHub login, `gh api user` = FullFran)
+- L6 (2026-11-19, verification): `npm test` 128/128 plus auth, MCP, proxy, boards, tickets, embed. Independent verifier: no critical/high. `pze_` refused on other boards, REST, pages, WebSocket, non-loopback peers, forwarded headers, wrong Host, after stop; tool policy fail-closed (batches, mcp-name mismatch, case and space variants, encodings); real engine's `session` listed exactly the 17 allowed tools; runtime image ships pi 1.5.2 and answers `ready`, canvas image has no engine. Medium: engine shares the gateway uid (can read its environ and vault); a same-host nginx with default headers passes the loopback check. Both documented in docs/agent.md, not fixed. Low: flag-off `/__agent*` is 404 before the gate; no gateway rate limit on drafts; one viewer can take all 100 event streams of a board; `pizarra-draft-` ids are skipped by browsers. S4, S5 pass; S1-S3 need T5.
