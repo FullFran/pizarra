@@ -7,6 +7,7 @@ import type { AccessPolicy } from './auth/index.js';
 import type { BoardService, Role, Visitor } from './boards/index.js';
 import { MAIN_BOARD } from './boards/index.js';
 import type { BoardDirectory, BoardSummary, Principal } from './gateway/application/ports.js';
+import { ALL_BOARDS_MCP_PATH } from './gateway/domain/board-path.js';
 
 /** `${issuer}/mcp` is board main; `${issuer}/b/<id>/mcp` is board `<id>`. */
 export function boardOfResource(issuer: string, resource: string): string | undefined {
@@ -22,12 +23,15 @@ export function boardsAccessPolicy(boards: BoardService, issuer: string): Access
   return {
     maySignIn: login => boards.maySignIn(login),
     describeResource: resource => {
+      // One token for every board its account can open; each call is checked against that board.
+      if (resource === `${issuer}${ALL_BOARDS_MCP_PATH}`) return { name: 'All your boards' };
       const board = boardOfResource(issuer, resource);
       const found = board ? boards.get(board) : undefined;
       // Issuer boards are opened by their issuer's tickets, never by OAuth tokens.
       return found && found.owner.kind === 'github' ? { name: `${found.name} (${found.id})` } : undefined;
     },
     mayUse: (login, resource) => {
+      if (resource === `${issuer}${ALL_BOARDS_MCP_PATH}`) return boards.maySignIn(login);
       const board = boardOfResource(issuer, resource);
       return board !== undefined && boards.roleFor(board, boards.visitorForLogin(login)) !== undefined;
     }

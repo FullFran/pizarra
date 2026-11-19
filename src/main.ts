@@ -153,6 +153,7 @@ async function main(): Promise<void> {
       }
     } : {}),
     mcpFactoryFor: board => mcp.get(board),
+    boardToolkit: board => mcp.toolkit(board),
     boards: boardDirectory(boards),
     upstream,
     proxy: new CanvasProxy(upstream, logger),

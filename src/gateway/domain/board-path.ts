@@ -33,3 +33,6 @@ export function parseBoardPath(path: string): BoardPath {
 export function boardPrefix(board: string): string {
   return `/b/${board}`;
 }
+
+/** The MCP endpoint over every board its caller can open (its own OAuth resource). */
+export const ALL_BOARDS_MCP_PATH = '/boards/mcp';
