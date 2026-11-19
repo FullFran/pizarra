@@ -1,3 +1,4 @@
+import { enginePlugin } from './engine.js';
 import { githubPlugin } from './github.js';
 import { trustedIssuerPlugin } from './trusted-issuer.js';
 import type { AuthPluginDefinition } from './types.js';
@@ -8,7 +9,8 @@ import type { AuthPluginDefinition } from './types.js';
  */
 export const AUTH_PLUGINS: Readonly<Record<string, AuthPluginDefinition<any>>> = {
   [githubPlugin.id]: githubPlugin,
-  [trustedIssuerPlugin.id]: trustedIssuerPlugin
+  [trustedIssuerPlugin.id]: trustedIssuerPlugin,
+  [enginePlugin.id]: enginePlugin
 };
 
 /** `AUTH_PROVIDERS` when unset: GitHub sign-in, as before plugins existed. */

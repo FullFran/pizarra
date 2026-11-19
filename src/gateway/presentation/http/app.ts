@@ -6,16 +6,23 @@ import type { AuthInfo, McpServerFactory } from '@modelcontextprotocol/server';
 import type { Logger } from '../../../shared/logger.js';
 import { DEFAULT_BOARD, parseBoardPath } from '../../domain/board-path.js';
 import { isPlainPath, isSafeMethod, isSameOrigin } from '../../domain/request-policy.js';
+import { agentRequestVerdict } from '../../domain/agent-policy.js';
 import { viewerRequestVerdict } from '../../domain/viewer-policy.js';
 import { AccessGate } from '../../application/access-gate.js';
 import type { BoardDirectory, BoardRole, CanvasUpstream, Principal, RequestAuthenticator } from '../../application/ports.js';
 import type { CanvasProxy } from '../../infrastructure/canvas-proxy.js';
 import { dropDataFrames } from '../../infrastructure/websocket-filter.js';
+import { AGENT_SCRIPT, AGENT_SCRIPT_PATH } from '../../../agent/panel.js';
 import { BOARD_SCRIPT, BOARD_SCRIPT_PATH, fetchBoardPage, injectBoardScript } from './board-page.js';
 import { MCP_AUTH_INFO_LOCAL, MCP_HTTP_PATH, createMcpHttpRouter } from './mcp-route.js';
 import { createMembersRouter } from './members.js';
 import { sendOutcome } from './responses.js';
 import type { SessionCheck } from './responses.js';
+
+/** Identity provider id of the agent's engine tokens. */
+const ENGINE_PROVIDER = 'engine';
+/** Where each board's agent routes live inside the board (`/b/<id>/__agent/...`, `/__agent/...` for main). */
+const AGENT_PATH = '/__agent';
 
 /** Service name reported on `/health` when auth is on. */
 export const GATEWAY_SERVICE = 'pizarra';
@@ -33,6 +40,16 @@ export interface GatewayAuth {
 /** Framing policy for a response (docs/auth.md, "Embedding boards"). */
 export type Framing = (headers: OutgoingHttpHeaders, kind: 'board' | 'other') => void;
 
+/** The agent feature, present only when `PIZARRA_AGENT=1` (it needs authentication). */
+export interface AgentGateway {
+  /** The only tools the agent's engine may call on `/mcp`. */
+  tools: readonly string[];
+  /** Serves `/__agent/*` of a board once the gateway has decided who asks (`res.locals.agent`). */
+  router: express.Router;
+  /** Runs the authentication check of an `/mcp` request with its connection visible to engine tokens. */
+  withConnection<T>(req: IncomingMessage, fn: () => T): T;
+}
+
 export interface GatewayAppOptions {
   bindHost: string;
   publicBaseUrl?: string;
@@ -45,6 +62,7 @@ export interface GatewayAppOptions {
   proxy: CanvasProxy;
   logger: Logger;
   framing?: Framing;
+  agent?: AgentGateway;
 }
 
 function single(value: unknown): string | undefined {
@@ -74,7 +92,9 @@ function rejectUpgrade(socket: Duplex, status: number, message: string): void {
  * With auth off (loopback) everyone owns every board.
  */
 export function createGatewayApp(options: GatewayAppOptions): { app: express.Express; onUpgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void } {
-  const { auth, upstream, proxy, logger, boards } = options;
+  const { auth, upstream, proxy, logger, boards, agent } = options;
+  if (agent && !auth) throw new Error('the agent needs authentication: it acts for signed-in people');
+  const agentTools: ReadonlySet<string> = new Set(agent?.tools ?? []);
   const resourcesOf = (board: string): string[] => {
     if (!auth) return [];
     const origin = auth.authenticator.origin;
@@ -105,6 +125,15 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.status(200).type('application/javascript').send(BOARD_SCRIPT);
   });
+  // The agent's board script (draft previews for every viewer, the panel for allowlisted
+  // editors). No secret in it; it only exists with the agent on.
+  if (agent) {
+    app.get(AGENT_SCRIPT_PATH, (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.status(200).type('application/javascript').send(AGENT_SCRIPT);
+    });
+  }
 
   if (auth) app.use(auth.router);
 
@@ -123,7 +152,9 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     } catch (error) {
       return next(error);
     }
-    const result = auth.authenticator.authenticate(gateHeaders(req), { resource: resourcesOf(board), acceptSession: false, board });
+    const authenticate = () => auth.authenticator.authenticate(gateHeaders(req), { resource: resourcesOf(board), acceptSession: false, board });
+    // Engine tokens are honoured only here, and only on the engine's own loopback connection.
+    const result = agent ? agent.withConnection(req, authenticate) : authenticate();
     if (!result.ok) {
       res.setHeader('WWW-Authenticate', result.challenge);
       res.status(result.status).json({ error: result.error });
@@ -135,7 +166,13 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
       res.status(404).json({ success: false, error: 'Board not found' });
       return;
     }
+    // The agent acts for an editor; a viewer's engine could not have been started, and is refused anyway.
+    if (principal.provider === ENGINE_PROVIDER && role !== 'editor' && role !== 'owner') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     res.locals.role = role;
+    res.locals.engine = principal.provider === ENGINE_PROVIDER;
     const authInfo: AuthInfo = {
       token: principal.token ?? '',
       clientId: principal.clientId ?? '',
@@ -147,14 +184,17 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     res.locals[MCP_AUTH_INFO_LOCAL] = authInfo;
     next();
   };
-  const viewerToolFilter: RequestHandler = (req, res, next) => {
-    if ((res.locals.role as BoardRole | undefined) !== 'viewer') return next();
-    const verdict = viewerRequestVerdict(Buffer.isBuffer(req.body) ? req.body : undefined, {
+  const toolFilter: RequestHandler = (req, res, next) => {
+    const engine = res.locals.engine === true;
+    if (!engine && (res.locals.role as BoardRole | undefined) !== 'viewer') return next();
+    const body = Buffer.isBuffer(req.body) ? req.body : undefined;
+    const headers = {
       contentEncoding: single(req.headers['content-encoding']),
       contentType: single(req.headers['content-type']),
       mcpMethod: single(req.headers['mcp-method']),
       mcpName: single(req.headers['mcp-name'])
-    });
+    };
+    const verdict = engine ? agentRequestVerdict(body, headers, agentTools) : viewerRequestVerdict(body, headers);
     if (verdict.ok) return next();
     res.status(verdict.status).json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: verdict.message } });
   };
@@ -165,7 +205,7 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     bindHost: options.bindHost,
     ...(options.publicBaseUrl ? { publicBaseUrl: options.publicBaseUrl } : {}),
     authMiddleware: [mcpAuth],
-    bodyFilter: viewerToolFilter
+    bodyFilter: toolFilter
   });
   app.use(MCP_HTTP_PATH, (_req, res, next) => { res.locals.board = DEFAULT_BOARD; next(); }, mcpRouter);
   app.use('/b/:board/mcp', (req, res, next) => {
@@ -232,7 +272,7 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
     const headers: OutgoingHttpHeaders = { 'content-type': page.type || 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
     framing(headers, 'board');
     res.writeHead(page.status, headers);
-    res.end(page.status === 200 ? injectBoardScript(page.body, { id: board, name: summary.name, signOut: Boolean(auth?.signInPath) }) : page.body);
+    res.end(page.status === 200 ? injectBoardScript(page.body, { id: board, name: summary.name, signOut: Boolean(auth?.signInPath) }, { agent: Boolean(agent) }) : page.body);
   };
 
   app.use(async (req: Request, res: Response, next: NextFunction) => {
@@ -249,13 +289,29 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
       res.redirect(302, `/b/${route.board}/${req.originalUrl.slice(req.path.length)}`);
       return;
     }
+    // The agent's own routes: without the feature they do not exist (not even as an upstream 404).
+    const agentRoute = route.rest === AGENT_PATH || route.rest.startsWith(`${AGENT_PATH}/`);
+    if (agentRoute && !agent) {
+      res.status(404).json({ success: false, error: 'Not found' });
+      return;
+    }
     // Upstream's bundle, shared by every board's page (it asks for /assets/... unprefixed).
     const shared = !route.prefixed && /^\/assets\//i.test(route.rest);
     let principal: Principal | undefined;
+    let role: BoardRole | undefined;
     if (gate) {
+      // Agent routes: the gate decides who may open the board (a session, a board role). Writes are
+      // checked by the agent router itself (strict Origin, JSON, allowlist, editor), so the gate sees
+      // them as the reads they are: a viewer's write gets a 404 there, not the gate's 403.
+      const method = agentRoute ? 'GET' : req.method;
       const verdict = shared
         ? gate.decideShared({ method: req.method, path: route.rest, headers: gateHeaders(req) })
-        : gate.decide({ method: req.method, path: route.rest, board: route.board, headers: gateHeaders(req) });
+        : gate.decide({ method, path: route.rest, board: route.board, headers: gateHeaders(req) });
+      if (agentRoute && verdict.kind === 'login') {
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+      }
       if (verdict.kind === 'login') return signIn(req, res);
       if (verdict.kind === 'reject') {
         if (verdict.challenge) res.setHeader('WWW-Authenticate', verdict.challenge);
@@ -263,6 +319,14 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
         return;
       }
       principal = verdict.principal;
+      role = verdict.role;
+    }
+    if (agentRoute && agent) {
+      res.locals.agent = { board: route.board, ...(principal ? { principal } : {}), ...(role ? { role } : {}) };
+      const query = req.originalUrl.indexOf('?');
+      req.url = `${route.rest.slice(AGENT_PATH.length) || '/'}${query >= 0 ? req.originalUrl.slice(query) : ''}`;
+      agent.router(req, res, next);
+      return;
     }
     if (route.prefixed && route.rest === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
       try {

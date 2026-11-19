@@ -43,7 +43,8 @@ export function visitorOf(boards: BoardService, principal: Principal): Visitor |
   if (principal.issuer) {
     return { kind: 'issuer', issuer: principal.issuer, role: principal.role === 'editor' ? 'editor' : 'viewer' };
   }
-  if (principal.provider === undefined || principal.provider === 'github') return boards.visitorForLogin(principal.login);
+  // The agent's engine acts for the GitHub person it was started for, on its one board.
+  if (principal.provider === undefined || principal.provider === 'github' || principal.provider === 'engine') return boards.visitorForLogin(principal.login);
   return undefined;
 }
 

@@ -9,6 +9,13 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { AgentHub } from './agent/hub.js';
+import { AgentManager } from './agent/manager.js';
+import { resolveAgentConfig } from './agent/config.js';
+import { AGENT_TOOLS } from './agent/protocol.js';
+import { createAgentRouter } from './agent/router.js';
+import { EngineTokens, engineConnectionCheck, withConnection } from './agent/tokens.js';
+import { CredentialVault } from './agent/vault.js';
 import { buildAuth, resolveAuthConfig } from './auth/index.js';
 import { MAIN_BOARD, buildBoards } from './boards/index.js';
 import { boardDirectory, boardsAccessPolicy } from './composition.js';
@@ -29,6 +36,12 @@ function formatHost(host: string): string {
   return host.includes(':') ? `[${host}]` : host;
 }
 
+/** How an engine process on this machine addresses the gateway. */
+function engineAddress(host: string, port: number): string {
+  const name = host === '::1' || host === '[::1]' ? '[::1]' : '127.0.0.1';
+  return port === 80 ? name : `${name}:${port}`;
+}
+
 function onStopSignals(stop: (signal: string) => void): void {
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));
@@ -46,6 +59,23 @@ async function main(): Promise<void> {
     for (const warning of authConfig.warnings) logger.warn(warning);
   } else if (authConfig.insecure) {
     logger.warn(`Authentication is OFF on non-loopback HOST=${config.host} (ALLOW_INSECURE_NO_AUTH=true): anyone who can reach this address can read and change every board.`);
+  }
+
+  // The agent acts for people signed in with GitHub: without that sign-in it cannot be on.
+  const agentConfig = resolveAgentConfig(process.env, { dataDir: config.dataDir });
+  if (agentConfig && (authConfig.mode !== 'oauth' || !authConfig.providers?.some(provider => provider.id === 'github'))) {
+    throw new Error('PIZARRA_AGENT=1 needs authentication with GitHub sign-in (AUTH_MODE=oauth and github in AUTH_PROVIDERS)');
+  }
+  const engineHost = engineAddress(config.host, config.port);
+  const agentTokens = new EngineTokens();
+  if (agentConfig && authConfig.mode === 'oauth') {
+    authConfig.providers = [...(authConfig.providers ?? []), {
+      id: 'engine',
+      config: {
+        resolve: (token: string) => agentTokens.resolve(token),
+        isEngineConnection: engineConnectionCheck(engineHost)
+      }
+    }];
   }
 
   if (config.dataDir) mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
@@ -89,6 +119,20 @@ async function main(): Promise<void> {
   };
   const mcp = new BoardMcpFactories({ canvasBaseUrl: upstream.baseUrl, exportDirOf });
 
+  const agentHub = new AgentHub();
+  const agentManager = agentConfig && config.dataDir
+    ? new AgentManager({
+      vault: new CredentialVault(config.dataDir, agentConfig.key),
+      tokens: agentTokens,
+      hub: agentHub,
+      mcpUrl: board => `http://${engineHost}/b/${board}/mcp`,
+      maxProcesses: agentConfig.maxProcesses,
+      ...(agentConfig.models ? { allowedModels: agentConfig.models } : {}),
+      logger
+    })
+    : undefined;
+  if (agentManager) process.on('exit', () => agentManager.killAll());
+
   const { app, onUpgrade } = createGatewayApp({
     bindHost: config.host,
     ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
@@ -99,6 +143,13 @@ async function main(): Promise<void> {
         authenticator: auth.authenticator,
         resource: auth.settings.resources[0]!,
         ...(auth.providers.includes('github') ? { signInPath: '/oauth/login' } : {})
+      }
+    } : {}),
+    ...(agentConfig && agentManager && auth ? {
+      agent: {
+        tools: AGENT_TOOLS,
+        withConnection,
+        router: createAgentRouter({ manager: agentManager, hub: agentHub, allowlist: agentConfig.users, origin: auth.settings.issuer })
       }
     } : {}),
     mcpFactoryFor: board => mcp.get(board),
@@ -124,7 +175,7 @@ async function main(): Promise<void> {
     logger.info(`Received ${signal}, shutting down`);
     server.close();
     server.closeAllConnections?.();
-    void upstream.stop().finally(() => process.exit(0));
+    void Promise.all([upstream.stop(), agentManager?.close()]).finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 5000).unref();
   };
   onStopSignals(shutdown);
@@ -138,6 +189,7 @@ async function main(): Promise<void> {
     url: local,
     mcp: `${config.publicBaseUrl ?? local}${MCP_HTTP_PATH}`,
     canvasState: config.canvasUrl ? `shared canvas pool at ${upstream.baseUrl}` : config.dataDir ?? 'in memory (set EXCALIDRAW_DATA_DIR to keep it)',
+    agent: agentConfig ? `on for ${agentConfig.users.size} login(s), up to ${agentConfig.maxProcesses} engine process(es)` : 'off',
     auth: auth ? `${auth.providers.join(', ')} (issuer ${auth.settings.issuer}, ${auth.settings.allowedLogins.size} admin(s))` : 'off'
   });
 }
