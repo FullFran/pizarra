@@ -357,3 +357,15 @@ test('the agent script is served only with the agent on', async t => {
   const missing = await fetch(`${off.origin}/__pizarra/agent.js`);
   assert.notEqual(missing.status, 200);
 });
+
+test('the main board page at / redirects to /b/main/ so it gets the board and agent scripts', async t => {
+  const ctx = await start();
+  t.after(ctx.close);
+  for (const [path, location] of [['/', '/b/main/'], ['/?embed=1', '/b/main/?embed=1']]) {
+    const res = await fetch(`${ctx.origin}${path}`, { redirect: 'manual', headers: { cookie: 's=fullfran' } });
+    assert.equal(res.status, 302, path);
+    assert.equal(res.headers.get('location'), location, path);
+  }
+  const api = await call(ctx, 'GET', '/api/elements');
+  assert.notEqual(api.status, 302, 'unprefixed API paths still go to the main board');
+});

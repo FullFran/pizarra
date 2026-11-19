@@ -328,6 +328,15 @@ export function createGatewayApp(options: GatewayAppOptions): { app: express.Exp
       agent.router(req, res, next);
       return;
     }
+    // The main board's page lives at /b/main/, where it gets the board script (live sync, sign-out)
+    // and the agent panel; unprefixed, upstream's bare page would load without them.
+    if (!route.prefixed && route.rest === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
+      const headers: OutgoingHttpHeaders = { location: `/b/${route.board}/${req.originalUrl.slice(req.path.length)}`, 'cache-control': 'no-store' };
+      framing(headers, 'board');
+      res.writeHead(302, headers);
+      res.end();
+      return;
+    }
     if (route.prefixed && route.rest === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
       try {
         await boardPage(res, route.board, principal);
