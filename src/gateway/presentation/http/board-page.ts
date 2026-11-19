@@ -1,5 +1,6 @@
 import http from 'node:http';
 import type { CanvasUpstream } from '../../application/ports.js';
+import { AGENT_SCRIPT_PATH } from '../../../agent/panel.js';
 
 /** Path of the script every board page loads before upstream's bundle. */
 export const BOARD_SCRIPT_PATH = '/__pizarra/board.js';
@@ -34,7 +35,9 @@ export const BOARD_SCRIPT = `(() => {
   const known = new Map();
   const IGNORED = new Set(['version', 'syncedAt', 'syncTimestamp', 'source', 'createdAt', 'updatedAt']);
   const print = element => JSON.stringify(Object.keys(element).sort().filter(key => !IGNORED.has(key)).map(key => [key, element[key]]));
-  const remember = elements => { for (const element of elements) if (element && element.id) known.set(element.id, print(element)); };
+  // The agent's draft previews live only in this page's scene: never saved, never board content.
+  const isDraft = element => Boolean(element) && typeof element.id === 'string' && element.id.startsWith('pizarra-draft-');
+  const remember = elements => { for (const element of elements) if (element && element.id && !isDraft(element)) known.set(element.id, print(element)); };
   const reset = elements => { known.clear(); remember(elements); };
   let pendingEchoes = 0;
   let pulling = false;
@@ -47,7 +50,7 @@ export const BOARD_SCRIPT = `(() => {
       const response = await originalFetch(new URL(prefix + '/api/elements', window.location.href).toString(), { credentials: 'same-origin' });
       if (!response.ok) return;
       const body = await response.json();
-      const elements = Array.isArray(body && body.elements) ? body.elements : [];
+      const elements = (Array.isArray(body && body.elements) ? body.elements : []).filter(element => !isDraft(element));
       const changed = elements.filter(element => element && element.id && known.get(element.id) !== print(element));
       const ids = new Set(elements.map(element => element && element.id));
       const removed = [...known.keys()].filter(id => !ids.has(id));
@@ -79,6 +82,16 @@ export const BOARD_SCRIPT = `(() => {
     }
   };
   const isSync = (url, init) => /\\/api\\/elements\\/sync$/.test(new URL(url, window.location.href).pathname) && String((init && init.method) || 'GET').toUpperCase() === 'POST';
+  // The body of this page's own sync without the draft previews (a body that is not JSON is left alone).
+  const withoutDrafts = text => {
+    try {
+      const sent = JSON.parse(text);
+      if (!sent || !Array.isArray(sent.elements) || !sent.elements.some(isDraft)) return text;
+      return JSON.stringify({ ...sent, elements: sent.elements.filter(element => !isDraft(element)) });
+    } catch {
+      return text;
+    }
+  };
   const trackSync = (promise, init) => {
     pendingEchoes += 1;
     try {
@@ -98,11 +111,17 @@ export const BOARD_SCRIPT = `(() => {
   window.fetch = (input, init) => {
     if (typeof input === 'string' || input instanceof URL) {
       const rewritten = toBoard(String(input));
-      const sent = originalFetch(rewritten || input, init);
-      return rewritten && isSync(rewritten, init) ? trackSync(sent, init) : sent;
+      if (rewritten && isSync(rewritten, init)) {
+        const clean = typeof init.body === 'string' ? { ...init, body: withoutDrafts(init.body) } : init;
+        return trackSync(originalFetch(rewritten, clean), clean);
+      }
+      return originalFetch(rewritten || input, init);
     }
     if (input instanceof Request) {
       const rewritten = toBoard(input.url);
+      if (rewritten && isSync(rewritten, { method: input.method })) {
+        return input.clone().text().then(text => originalFetch(new Request(rewritten, { method: input.method, headers: input.headers, credentials: input.credentials, body: withoutDrafts(text) }), init));
+      }
       return originalFetch(rewritten ? new Request(rewritten, input) : input, init);
     }
     return originalFetch(input, init);
@@ -119,12 +138,14 @@ export const BOARD_SCRIPT = `(() => {
       this.__pizarraHandler = handler;
       if (typeof handler !== 'function') { super.onmessage = handler; return; }
       deliver = message => handler.call(this, { data: JSON.stringify(message) });
+      // The agent panel script (loaded after this one) draws its previews through this hook.
       super.onmessage = event => {
         try { observe(JSON.parse(event.data)); } catch { /* not JSON: upstream's handler decides */ }
         return handler.call(this, event);
       };
     }
   };
+  Object.defineProperty(window, '__pizarraDeliver', { value: message => { if (deliver) deliver(message); }, configurable: true });
   const embedded = new URLSearchParams(window.location.search).get('embed') === '1';
   if (embedded) return;
   const badge = () => {
@@ -173,9 +194,15 @@ export function fetchBoardPage(upstream: CanvasUpstream, board: string): Promise
   });
 }
 
-/** Upstream's page with the board script first in `<head>`. */
-export function injectBoardScript(html: string, board: { id: string; name: string; signOut: boolean }): string {
-  const tag = `<script src="${BOARD_SCRIPT_PATH}" data-board="${escapeAttribute(board.id)}" data-name="${escapeAttribute(board.name)}"${board.signOut ? ' data-signout="1"' : ''}></script>`;
+/** Upstream's page with the board script first in `<head>` (and the agent panel script after it, when asked). */
+export function injectBoardScript(
+  html: string,
+  board: { id: string; name: string; signOut: boolean },
+  options: { agent?: boolean } = {}
+): string {
+  const boardTag = `<script src="${BOARD_SCRIPT_PATH}" data-board="${escapeAttribute(board.id)}" data-name="${escapeAttribute(board.name)}"${board.signOut ? ' data-signout="1"' : ''}></script>`;
+  const agentTag = options.agent ? `<script src="${AGENT_SCRIPT_PATH}" data-board="${escapeAttribute(board.id)}" defer></script>` : '';
+  const tag = `${boardTag}${agentTag}`;
   const head = /<head[^>]*>/i.exec(html);
   if (!head) return `${tag}${html}`;
   const at = head.index + head[0].length;

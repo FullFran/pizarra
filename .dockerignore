@@ -8,3 +8,4 @@ scripts
 !scripts/build-upstream.sh
 docs
 *.md
+engine/node_modules
